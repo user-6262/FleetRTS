@@ -1,0 +1,15 @@
+[Unit]
+Description=FleetRTS droplet HTTP stub (matchmaking placeholder)
+After=network.target
+
+[Service]
+Type=simple
+# Change to your deploy user and path on the VPS:
+User=www-data
+WorkingDirectory=/opt/fleetrts-server
+ExecStart=/usr/bin/python3 /opt/fleetrts-server/droplet_http_stub.py --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

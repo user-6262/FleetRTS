@@ -1,0 +1,2 @@
+# Droplet HTTP stub (server/droplet_http_stub.py) uses stdlib only — no packages here.
+# When you add a real stack (e.g. aiohttp, redis, postgres), list those dependencies below.

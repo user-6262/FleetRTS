@@ -1,0 +1,14 @@
+[Unit]
+Description=FleetRTS TCP relay (lobby broadcast)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/fleetrts-server
+ExecStart=/usr/bin/python3 /opt/fleetrts-server/tcp_relay.py --host 0.0.0.0 --port 8766
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

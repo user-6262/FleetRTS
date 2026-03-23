@@ -1,0 +1,50 @@
+Windows build for friends (no Python install)
+==============================================
+
+You build once on your PC; your friend gets a zip of the folder described below.
+
+Prerequisites (your machine)
+----------------------------
+  Python 3.10+ with pygame installed (same as your dev setup).
+
+  pip install pyinstaller
+
+Build
+-----
+  From the FleetRTS repo root (folder that contains pyproject.toml and FleetRTS.spec):
+
+    pyinstaller FleetRTS.spec --noconfirm
+
+  Output folder:
+
+    dist\FleetRTS\
+
+  Run locally to verify: double-click FleetRTS.exe inside that folder.
+
+What to send your friend
+------------------------
+  Zip the entire folder  dist\FleetRTS\  (not only the .exe). They unzip anywhere
+  and run FleetRTS.exe. Windows may show SmartScreen for an unsigned app — "More
+  info" → "Run anyway" is normal for hobby builds.
+
+Multiplayer (optional)
+----------------------
+  They still need your droplet address. Set a Windows user environment variable:
+
+    FLEETRTS_HTTP = http://YOUR_DROPLET:8765
+
+  (Search "environment variables" → Environment Variables → New under User.)
+
+  Or you can give them a small .cmd launcher:
+
+    set FLEETRTS_HTTP=http://YOUR_DROPLET:8765
+    start "" "%~dp0FleetRTS.exe"
+
+  Save next to FleetRTS.exe.
+
+Troubleshooting
+---------------
+  If the game flashes and closes, rebuild with a console window to see errors:
+  in FleetRTS.spec set  console=True  on the EXE(...) line, then rebuild.
+
+  If sounds are missing, ensure assets/sound was present when you ran PyInstaller.

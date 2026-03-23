@@ -1,0 +1,37 @@
+FleetRTS — combat layer design notes
+====================================
+
+Original shape
+--------------
+The playable prototype grew as a single-player campaign loop: JSON-driven ships,
+one human “player” side, an “enemy” side, strike vs recovery rounds, then debrief.
+
+Why treat combat as a sandbox
+------------------------------
+Multiplayer (co-op, custom lobbies, maybe PvP) and “custom games” are easier if the
+combat layer stays **data-driven and side-agnostic** where possible:
+
+  - **Sides** — Today most logic hard-codes `"player"` vs `"enemy"`. Longer term,
+    “team id” or faction slots allow co-op (multiple player teams vs AI), PvP, or
+    three-way fights without rewriting the whole sim.
+
+  - **Pressure / difficulty** — `enemy_pressure` (and similar knobs) are examples
+    of **scenario parameters** hosts can set instead of fixed campaign curves.
+
+  - **Objectives** — Strike / recovery / pods are one ruleset. A sandbox-friendly
+    `MissionState` (or scenario descriptor) can later swap objectives (hold zone,
+    escort, king of the hill) while reusing movement, weapons, and fog.
+
+  - **Authoritative step** — `combat_sim.step_combat_frame` + `combat_engine` are
+    meant to converge on “one deterministic tick” the server runs and clients only
+    display + send commands. Keeping rules out of pygame input code supports that.
+
+Practical direction
+-------------------
+  - Prefer **parameters** (hooks, scenario struct, side lists) over new special cases.
+  - Move **pure rules** into `combat_engine.py` / `combat_sim.py`; keep **I/O and
+    presentation** in `demo_game.py`.
+  - When adding MP, thread **commands in → state out** rather than duplicating combat
+    logic on the client.
+
+This file is intent only; behavior is defined by code.
