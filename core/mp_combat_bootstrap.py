@@ -22,6 +22,7 @@ def bootstrap_mp_combat_match(
     groups: List[Any],
     crafts: List[Any],
     player_setup: Optional[dict] = None,
+    mp_pvp: bool = False,
 ) -> Any:
     """Replace `groups` / `crafts` contents and return the new `mission`."""
     groups.clear()
@@ -63,6 +64,7 @@ def bootstrap_mp_combat_match(
         random.Random(rng_seed),
         obs,
         enemy_pressure=enemy_pressure,
+        mp_pvp=bool(mp_pvp),
     )
     dg.snap_strike_crafts_to_carriers(crafts)
     return mission

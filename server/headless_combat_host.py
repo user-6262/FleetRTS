@@ -229,6 +229,7 @@ def main() -> None:
                 groups=groups,
                 crafts=crafts,
                 player_setup=cfg.get("player_setup"),
+                mp_pvp=not bool(cfg.get("coop", True)),
             )
             control_groups[0] = dg.all_player_capital_labels(groups)
             combat_mode[0] = "running"

@@ -83,14 +83,28 @@ def control_group_slots_for_capital_label(
     return [i for i, labs in enumerate(control_groups) if labs and capital_label in labs]
 
 
-def is_valid_attack_focus_for_side(attacker_side: str, pref: Optional[Any]) -> bool:
+def is_valid_attack_focus_for_side(
+    attacker_side: str,
+    pref: Optional[Any],
+    *,
+    attacker_owner: Optional[str] = None,
+    mp_pvp: bool = False,
+) -> bool:
     if pref is None or getattr(pref, "dead", True):
         return False
     dg = _dg()
     if isinstance(pref, dg.GroundObjective):
         return True
     ps = getattr(pref, "side", None)
-    return ps is not None and ps != attacker_side
+    if ps is None:
+        return False
+    if ps != attacker_side:
+        return True
+    if mp_pvp and attacker_side == "player" and attacker_owner:
+        towner = getattr(pref, "owner_id", None)
+        if towner and towner != attacker_owner:
+            return True
+    return False
 
 
 def prefer_attack_target_in_weapon_range(
@@ -100,8 +114,13 @@ def prefer_attack_target_in_weapon_range(
     origin_z: float,
     r: float,
     attacker_side: str,
+    *,
+    attacker_owner: Optional[str] = None,
+    mp_pvp: bool = False,
 ) -> bool:
-    if not is_valid_attack_focus_for_side(attacker_side, pref):
+    if not is_valid_attack_focus_for_side(
+        attacker_side, pref, attacker_owner=attacker_owner, mp_pvp=mp_pvp
+    ):
         return False
     dg = _dg()
     if isinstance(pref, dg.GroundObjective):
@@ -112,11 +131,17 @@ def prefer_attack_target_in_weapon_range(
     return abs(pz - origin_z) <= Z_HIT_BAND + 30.0
 
 
-def prune_attack_targets(groups: List[Any]) -> None:
+def prune_attack_targets(groups: List[Any], mission: Optional[Any] = None) -> None:
+    pvp = bool(getattr(mission, "mp_pvp", False)) if mission is not None else False
     for g in groups:
         if g.side != "player":
             continue
-        if not is_valid_attack_focus_for_side("player", g.attack_target):
+        if not is_valid_attack_focus_for_side(
+            "player",
+            g.attack_target,
+            attacker_owner=getattr(g, "owner_id", None),
+            mp_pvp=pvp,
+        ):
             g.attack_target = None
 
 
@@ -158,12 +183,27 @@ def notify_player_unit_damaged_for_engagement(
             cg_weapons_free[si] = True
 
 
-def iter_hostiles(groups: List[Any], crafts: List[Any], side: str):
+def iter_hostiles(
+    groups: List[Any],
+    crafts: List[Any],
+    side: str,
+    *,
+    viewer_owner: Optional[str] = None,
+    mp_pvp: bool = False,
+):
     for g in groups:
-        if not g.dead and g.side != side:
+        if g.dead:
+            continue
+        if g.side != side:
+            yield g
+        elif mp_pvp and side == "player" and viewer_owner and getattr(g, "owner_id", None) != viewer_owner:
             yield g
     for c in crafts:
-        if not c.dead and c.side != side:
+        if c.dead:
+            continue
+        if c.side != side:
+            yield c
+        elif mp_pvp and side == "player" and viewer_owner and getattr(c, "owner_id", None) != viewer_owner:
             yield c
 
 
@@ -175,12 +215,17 @@ def nearest_hostile(
     crafts: List[Any],
     side: str,
     fog: Optional[Any] = None,
+    *,
+    viewer_owner: Optional[str] = None,
+    mp_pvp: bool = False,
 ) -> Optional[Any]:
     if side == "enemy" and fog is not None and not ce.fog_cell_visible(fog, x, y):
         return None
     best = None
     best_d = max_r + 1
-    for t in iter_hostiles(groups, crafts, side):
+    for t in iter_hostiles(
+        groups, crafts, side, viewer_owner=viewer_owner, mp_pvp=mp_pvp
+    ):
         if fog is not None and not ce.fog_cell_visible(fog, t.x, t.y):
             continue
         d = dist_xy(x, y, t.x, t.y)
@@ -213,6 +258,23 @@ def best_pd_missile_target(
     return best
 
 
+def _craft_is_hostile_to_side(
+    c: Any,
+    side: str,
+    *,
+    viewer_owner: Optional[str],
+    mp_pvp: bool,
+) -> bool:
+    if c.side != side:
+        return True
+    return bool(
+        mp_pvp
+        and side == "player"
+        and viewer_owner
+        and getattr(c, "owner_id", None) != viewer_owner
+    )
+
+
 def best_fighter_missile_weapon_target(
     x: float,
     y: float,
@@ -224,18 +286,37 @@ def best_fighter_missile_weapon_target(
     missiles: List[Any],
     prefer_attack_target: Optional[Any],
     fog: Optional[Any] = None,
+    *,
+    launcher_owner: Optional[str] = None,
+    mp_pvp: bool = False,
 ) -> Optional[Any]:
     pref = prefer_attack_target
-    if prefer_attack_target_in_weapon_range(pref, x, y, origin_z, max_r, side):
+    if prefer_attack_target_in_weapon_range(
+        pref,
+        x,
+        y,
+        origin_z,
+        max_r,
+        side,
+        attacker_owner=launcher_owner,
+        mp_pvp=mp_pvp,
+    ):
         dg = _dg()
-        if isinstance(pref, dg.Craft) and not pref.dead and pref.side != side:
-            if fog is None or ce.fog_cell_visible(fog, pref.x, pref.y):
-                return pref
+        if isinstance(pref, dg.Craft) and not pref.dead:
+            if _craft_is_hostile_to_side(
+                pref, side, viewer_owner=launcher_owner, mp_pvp=mp_pvp
+            ):
+                if fog is None or ce.fog_cell_visible(fog, pref.x, pref.y):
+                    return pref
     for class_tier in (("Fighter", "Interceptor"), ("Bomber",)):
         best_c: Optional[Any] = None
         best_d = max_r + 1.0
         for c in crafts:
-            if c.dead or c.side == side or c.class_name not in class_tier:
+            if c.dead or c.class_name not in class_tier:
+                continue
+            if not _craft_is_hostile_to_side(
+                c, side, viewer_owner=launcher_owner, mp_pvp=mp_pvp
+            ):
                 continue
             if fog is not None and not ce.fog_cell_visible(fog, c.x, c.y):
                 continue
@@ -251,7 +332,17 @@ def best_fighter_missile_weapon_target(
     pm = best_pd_missile_target(x, y, origin_z, side, max_r, missiles)
     if pm is not None:
         return pm
-    return nearest_hostile(x, y, max_r, groups, crafts, side, fog)
+    return nearest_hostile(
+        x,
+        y,
+        max_r,
+        groups,
+        crafts,
+        side,
+        fog,
+        viewer_owner=launcher_owner,
+        mp_pvp=mp_pvp,
+    )
 
 
 def _pd_slug_acquisition_range(data: dict, ship_max_range: float) -> float:
@@ -351,12 +442,19 @@ def player_capital_may_fire_weapons(
     g: Any,
     control_groups: List[Optional[List[str]]],
     cg_weapons_free: List[bool],
+    *,
+    mp_pvp: bool = False,
 ) -> bool:
     if g.side != "player" or g.dead:
         return False
     if g.attack_move:
         return True
-    if is_valid_attack_focus_for_side("player", g.attack_target):
+    if is_valid_attack_focus_for_side(
+        "player",
+        g.attack_target,
+        attacker_owner=getattr(g, "owner_id", None),
+        mp_pvp=mp_pvp,
+    ):
         return True
     if g.engagement_timer > 0:
         return True
@@ -370,13 +468,20 @@ def player_craft_may_fire_weapons(
     c: Any,
     control_groups: List[Optional[List[str]]],
     cg_weapons_free: List[bool],
+    *,
+    mp_pvp: bool = False,
 ) -> bool:
     if c.side != "player" or c.dead or c.parent.dead:
         return False
     p = c.parent
     if p.attack_move:
         return True
-    if is_valid_attack_focus_for_side("player", p.attack_target):
+    if is_valid_attack_focus_for_side(
+        "player",
+        p.attack_target,
+        attacker_owner=getattr(p, "owner_id", None),
+        mp_pvp=mp_pvp,
+    ):
         return True
     if c.engagement_timer > 0 or p.engagement_timer > 0:
         return True
@@ -620,8 +725,22 @@ def try_fire_weapons(
     prefer_attack_target: Optional[Any] = None,
     obstacles: Optional[List[Any]] = None,
     fog: Optional[Any] = None,
+    launcher_owner: Optional[str] = None,
+    mp_pvp: bool = False,
 ) -> None:
     dg = _dg()
+
+    def _pref_blocked_by_fog(pref: Optional[Any]) -> bool:
+        if fog is None or pref is None or not isinstance(pref, (dg.Group, dg.Craft)):
+            return False
+        if not ce.fog_cell_visible(fog, pref.x, pref.y):
+            if getattr(pref, "side", "") != side:
+                return True
+            if mp_pvp and side == "player" and launcher_owner:
+                if getattr(pref, "owner_id", None) != launcher_owner:
+                    return True
+        return False
+
     for rw in weapons:
         rw.cooldown -= dt
     if not weapons_authorized:
@@ -638,31 +757,79 @@ def try_fire_weapons(
         if proj["delivery"] == "ballistic" and rw.projectile_name == "PD Slug":
             tgt = best_pd_missile_target(x, y, origin_z, side, r, missiles)
             if tgt is None:
-                if prefer_attack_target_in_weapon_range(pref, x, y, origin_z, r, side) and not (
-                    fog is not None
-                    and isinstance(pref, (dg.Group, dg.Craft))
-                    and getattr(pref, "side", "") != side
-                    and not ce.fog_cell_visible(fog, pref.x, pref.y)
-                ):
+                if prefer_attack_target_in_weapon_range(
+                    pref,
+                    x,
+                    y,
+                    origin_z,
+                    r,
+                    side,
+                    attacker_owner=launcher_owner,
+                    mp_pvp=mp_pvp,
+                ) and not _pref_blocked_by_fog(pref):
                     tgt = pref
                 else:
-                    tgt = nearest_hostile(x, y, r, groups, crafts, side, fog)
+                    tgt = nearest_hostile(
+                        x,
+                        y,
+                        r,
+                        groups,
+                        crafts,
+                        side,
+                        fog,
+                        viewer_owner=launcher_owner,
+                        mp_pvp=mp_pvp,
+                    )
         elif rw.projectile_name == "Fighter Missile":
             tgt = best_fighter_missile_weapon_target(
-                x, y, origin_z, side, r, groups, crafts, missiles, pref, fog
+                x,
+                y,
+                origin_z,
+                side,
+                r,
+                groups,
+                crafts,
+                missiles,
+                pref,
+                fog,
+                launcher_owner=launcher_owner,
+                mp_pvp=mp_pvp,
             )
         else:
-            if prefer_attack_target_in_weapon_range(pref, x, y, origin_z, r, side) and not (
-                fog is not None
-                and isinstance(pref, (dg.Group, dg.Craft))
-                and getattr(pref, "side", "") != side
-                and not ce.fog_cell_visible(fog, pref.x, pref.y)
-            ):
+            if prefer_attack_target_in_weapon_range(
+                pref,
+                x,
+                y,
+                origin_z,
+                r,
+                side,
+                attacker_owner=launcher_owner,
+                mp_pvp=mp_pvp,
+            ) and not _pref_blocked_by_fog(pref):
                 tgt = pref
             else:
-                tgt = nearest_hostile(x, y, r, groups, crafts, side, fog)
+                tgt = nearest_hostile(
+                    x,
+                    y,
+                    r,
+                    groups,
+                    crafts,
+                    side,
+                    fog,
+                    viewer_owner=launcher_owner,
+                    mp_pvp=mp_pvp,
+                )
         if side == "player" and objective and not objective.dead:
-            use_obj = not prefer_attack_target_in_weapon_range(pref, x, y, origin_z, r, side)
+            use_obj = not prefer_attack_target_in_weapon_range(
+                pref,
+                x,
+                y,
+                origin_z,
+                r,
+                side,
+                attacker_owner=launcher_owner,
+                mp_pvp=mp_pvp,
+            )
             if use_obj:
                 d_o = dist_xy(x, y, objective.x, objective.y)
                 if d_o <= r:
@@ -750,7 +917,7 @@ def try_fire_weapons(
             ux, uy = math.cos(ang), math.sin(ang)
             if side == "player":
                 cid = int(getattr(launcher, "color_id", 0))
-                base = dg.MP_COOP_BLUE_PALETTE[cid % len(dg.MP_COOP_BLUE_PALETTE)]
+                base = dg.MP_PLAYER_PALETTE[cid % len(dg.MP_PLAYER_PALETTE)]
                 col = tuple(min(255, int(ch * 1.15)) for ch in base)
             else:
                 col = (255, 120, 100)

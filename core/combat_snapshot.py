@@ -347,6 +347,22 @@ def snapshot_state(
         "round_idx": int(round_idx),
         "mission": {
             "kind": mission.kind,
+            "mp_pvp": bool(getattr(mission, "mp_pvp", False)),
+            "pvp_scrap": {
+                str(k): int(v)
+                for k, v in (getattr(mission, "pvp_scrap", {}) or {}).items()
+                if str(k).strip()
+            },
+            "pvp_territory": {
+                str(k): str(v)
+                for k, v in (getattr(mission, "pvp_territory", {}) or {}).items()
+                if str(k).strip()
+            },
+            "pvp_battlegroups": {
+                str(k): list(v) if isinstance(v, list) else []
+                for k, v in (getattr(mission, "pvp_battlegroups", {}) or {}).items()
+                if str(k).strip()
+            },
             "objective": obj,
             "pods": pods,
             "reinf_remaining": int(mission.reinf_remaining),
@@ -429,6 +445,22 @@ def apply_snapshot_state(
 
     ms = state["mission"]
     mission.kind = str(ms["kind"])
+    mission.mp_pvp = bool(ms.get("mp_pvp", False))
+    mission.pvp_scrap = {
+        str(k): int(v)
+        for k, v in (ms.get("pvp_scrap") or {}).items()
+        if str(k).strip()
+    }
+    mission.pvp_territory = {
+        str(k): str(v)
+        for k, v in (ms.get("pvp_territory") or {}).items()
+        if str(k).strip()
+    }
+    mission.pvp_battlegroups = {
+        str(k): list(v) if isinstance(v, list) else []
+        for k, v in (ms.get("pvp_battlegroups") or {}).items()
+        if str(k).strip()
+    }
     mission.reinf_remaining = int(ms["reinf_remaining"])
     mission.reinf_timer = float(ms["reinf_timer"])
     mission.pods_collected = int(ms["pods_collected"])

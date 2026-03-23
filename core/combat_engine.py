@@ -93,6 +93,8 @@ def finalize_deaths(groups: List[Any], crafts: List[Any]) -> None:
 
 
 def mission_allows_extract(ms: Any) -> bool:
+    if ms.kind == "pvp":
+        return False
     if ms.kind == "strike":
         return ms.objective is not None and ms.objective.dead
     return ms.pods_collected >= ms.pods_required
@@ -111,6 +113,7 @@ def begin_combat_round(
     rng: random.Random,
     obstacles: List[Any],
     enemy_pressure: int = 0,
+    mp_pvp: bool = False,
 ) -> Any:
     import demo_game as dg
 
@@ -119,6 +122,21 @@ def begin_combat_round(
     ep = max(0, min(3, int(enemy_pressure)))
     n_en_boost = ep
     reinf_boost = (ep + 1) // 2
+
+    if mp_pvp:
+        return dg.MissionState(
+            kind="pvp",
+            objective=None,
+            pods=[],
+            reinf_remaining=0,
+            reinf_timer=REINF_INTERVAL_BASE,
+            pods_collected=0,
+            pods_required=0,
+            enemy_label_serial=0,
+            initial_enemies_spawned=0,
+            obstacles=list(obstacles),
+            mp_pvp=True,
+        )
 
     def add_enemy(cls_name: str, ex: float, ey: float) -> None:
         nonlocal serial
@@ -180,6 +198,7 @@ def begin_combat_round(
         enemy_label_serial=serial,
         initial_enemies_spawned=serial,
         obstacles=list(obstacles),
+        mp_pvp=bool(mp_pvp),
     )
 
 

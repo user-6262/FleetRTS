@@ -138,6 +138,11 @@ except ImportError:
     from core.combat_snapshot import SNAP_VERSION, apply_snapshot_state, hash_state_dict, snapshot_state
     from core.net.combat_net import COMBAT_CMD, COMBAT_SNAP, combat_cmd, combat_snap
 
+try:
+    from pvp_battlegroups import BattlegroupPreset, default_battlegroups_path, load_battlegroups, save_battlegroups
+except ImportError:
+    from core.pvp_battlegroups import BattlegroupPreset, default_battlegroups_path, load_battlegroups, save_battlegroups
+
 NET_MP = False
 FleetHttpError = RuntimeError
 RelayClient: Any = None
@@ -671,11 +676,30 @@ def apply_bomber_context_order(
 
 
 def select_strike_wing_for_carriers(
-    crafts: List[Craft], groups: List[Group], squadron_index: int, additive: bool
+    crafts: List[Craft],
+    groups: List[Group],
+    squadron_index: int,
+    additive: bool,
+    owner_id: Optional[str] = None,
 ) -> None:
-    carriers = [g for g in groups if g.side == "player" and g.selected and not g.dead and g.class_name == "Carrier"]
+    carriers = [
+        g
+        for g in groups
+        if g.side == "player"
+        and g.selected
+        and not g.dead
+        and g.class_name == "Carrier"
+        and (owner_id is None or getattr(g, "owner_id", "") == owner_id)
+    ]
     if not carriers:
-        carriers = [g for g in groups if g.side == "player" and not g.dead and g.class_name == "Carrier"]
+        carriers = [
+            g
+            for g in groups
+            if g.side == "player"
+            and not g.dead
+            and g.class_name == "Carrier"
+            and (owner_id is None or getattr(g, "owner_id", "") == owner_id)
+        ]
     if not additive:
         clear_craft_selection(crafts)
     car_set = set(id(g) for g in carriers)
@@ -942,6 +966,14 @@ def ship_class_by_name(data: dict, name: str) -> dict:
         if sc["name"] == name:
             return sc
     raise KeyError(name)
+
+
+def capital_ship_class_names(data: dict) -> List[str]:
+    out: List[str] = []
+    for sc in data.get("ship_classes") or []:
+        if sc.get("render") == "capital" and sc.get("name"):
+            out.append(str(sc["name"]))
+    return sorted(out)
 
 
 def weapon_loadout_slot_choices(data: dict, slot: dict) -> List[dict]:
@@ -1300,6 +1332,10 @@ class MissionState:
     enemy_label_serial: int
     initial_enemies_spawned: int
     obstacles: List[Asteroid] = field(default_factory=list)
+    mp_pvp: bool = False
+    pvp_scrap: Dict[str, int] = field(default_factory=dict)
+    pvp_territory: Dict[str, str] = field(default_factory=dict)
+    pvp_battlegroups: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 
 def make_group(
@@ -1486,15 +1522,39 @@ def normalize_rect(x0: int, y0: int, x1: int, y1: int) -> pygame.Rect:
     return pygame.Rect(left, top, max(1, w), max(1, h))
 
 
-def player_capitals_in_rect(groups: List[Group], rect: pygame.Rect, cam_x: float, cam_y: float) -> List[Group]:
+def player_capitals_in_rect(
+    groups: List[Group],
+    rect: pygame.Rect,
+    cam_x: float,
+    cam_y: float,
+    owner_id: Optional[str] = None,
+) -> List[Group]:
     out: List[Group] = []
     for g in groups:
         if g.side != "player" or g.dead or not g.render_capital:
+            continue
+        if owner_id is not None and getattr(g, "owner_id", "") != owner_id:
             continue
         sx, sy, _ = world_to_screen(g.x, g.y, g.z, cam_x, cam_y)
         if rect.collidepoint(sx, sy):
             out.append(g)
     return out
+
+
+def _is_hostile_pick_target(
+    u: Any,
+    *,
+    viewer_side: str,
+    viewer_owner: Optional[str],
+    mp_pvp: bool,
+) -> bool:
+    if u.dead:
+        return False
+    if u.side == "enemy":
+        return True
+    if mp_pvp and viewer_side == "player" and u.side == "player" and viewer_owner:
+        return getattr(u, "owner_id", None) != viewer_owner
+    return u.side != viewer_side
 
 
 def pick_hostile_at(
@@ -1505,12 +1565,16 @@ def pick_hostile_at(
     cam_x: float,
     cam_y: float,
     viewer_side: str = "player",
+    viewer_owner: Optional[str] = None,
+    mp_pvp: bool = False,
 ) -> Optional[Any]:
     """Closest enemy capital or strike craft under the cursor (screen px)."""
     best: Optional[Any] = None
     best_d = 9999.0
     for g in groups:
-        if g.dead or g.side == viewer_side or not g.render_capital:
+        if not g.render_capital or not _is_hostile_pick_target(
+            g, viewer_side=viewer_side, viewer_owner=viewer_owner, mp_pvp=mp_pvp
+        ):
             continue
         sx, sy, sc = world_to_screen(g.x, g.y, g.z, cam_x, cam_y)
         pick_r = CAPITAL_PICK_R * max(0.85, sc)
@@ -1519,7 +1583,9 @@ def pick_hostile_at(
             best_d = d
             best = g
     for c in crafts:
-        if c.dead or c.side == viewer_side:
+        if not _is_hostile_pick_target(
+            c, viewer_side=viewer_side, viewer_owner=viewer_owner, mp_pvp=mp_pvp
+        ):
             continue
         sx, sy, sc = world_to_screen(c.x, c.y, c.z, cam_x, cam_y)
         pick_r = 24.0 * max(0.78, sc)
@@ -1701,7 +1767,13 @@ def capital_on_screen(g: Group, cam_x: float, cam_y: float, margin: float = 64.0
     return -margin <= sx <= VIEW_W + margin and -margin <= sy <= VIEW_H + margin
 
 
-def select_all_same_class_visible(groups: List[Group], class_name: str, cam_x: float, cam_y: float) -> None:
+def select_all_same_class_visible(
+    groups: List[Group],
+    class_name: str,
+    cam_x: float,
+    cam_y: float,
+    owner_id: Optional[str] = None,
+) -> None:
     vis = [
         g
         for g in groups
@@ -1710,6 +1782,7 @@ def select_all_same_class_visible(groups: List[Group], class_name: str, cam_x: f
         and g.render_capital
         and g.class_name == class_name
         and capital_on_screen(g, cam_x, cam_y)
+        and (owner_id is None or getattr(g, "owner_id", "") == owner_id)
     ]
     set_selection(groups, vis)
 
@@ -1720,8 +1793,10 @@ def add_to_selection(groups: List[Group], to_add: List[Group]) -> None:
             g.selected = True
 
 
-def toggle_capital_in_selection(hit: Group) -> None:
+def toggle_capital_in_selection(hit: Group, owner_id: Optional[str] = None) -> None:
     if hit.dead or not hit.render_capital:
+        return
+    if owner_id is not None and getattr(hit, "owner_id", "") != owner_id:
         return
     hit.selected = not hit.selected
 
@@ -1774,7 +1849,8 @@ def draw_craft_triangle(
 
 
 def player_unit_color(color_id: int, *, coop_mode: bool, for_craft: bool) -> Tuple[int, int, int]:
-    pal = MP_COOP_BLUE_PALETTE if coop_mode else MP_PLAYER_PALETTE
+    _ = coop_mode  # reserved: co-op vs PvP still uses distinct per-slot palette for readability
+    pal = MP_PLAYER_PALETTE
     base = pal[int(max(0, min(int(color_id), len(pal) - 1)))]
     if for_craft:
         return tuple(min(255, int(ch * 1.1)) for ch in base)
@@ -2799,17 +2875,19 @@ class ConfigMenuLayout:
     volume_track: pygame.Rect
     tts_toggle: pygame.Rect
     design_fleet_btn: pygame.Rect
+    battlegroups_btn: pygame.Rect
     multiplayer_btn: pygame.Rect
 
 
 def config_menu_layout() -> ConfigMenuLayout:
-    pw, ph = 580, 400
+    pw, ph = 580, 468
     panel = pygame.Rect(WIDTH // 2 - pw // 2, HEIGHT // 2 - ph // 2, pw, ph)
     volume_track = pygame.Rect(panel.centerx - 210, panel.y + 128, 420, 16)
     tts_toggle = pygame.Rect(panel.centerx - 76, panel.y + 196, 152, 34)
-    design_fleet_btn = pygame.Rect(panel.centerx - 130, panel.bottom - 112, 260, 44)
-    multiplayer_btn = pygame.Rect(panel.centerx - 130, panel.bottom - 56, 260, 44)
-    return ConfigMenuLayout(panel, volume_track, tts_toggle, design_fleet_btn, multiplayer_btn)
+    design_fleet_btn = pygame.Rect(panel.centerx - 130, panel.y + 312, 260, 44)
+    battlegroups_btn = pygame.Rect(panel.centerx - 130, panel.y + 364, 260, 44)
+    multiplayer_btn = pygame.Rect(panel.centerx - 130, panel.y + 416, 260, 44)
+    return ConfigMenuLayout(panel, volume_track, tts_toggle, design_fleet_btn, battlegroups_btn, multiplayer_btn)
 
 
 @dataclass
@@ -3587,6 +3665,17 @@ def draw_config_menu(
         ),
     )
 
+    pygame.draw.rect(surf, (58, 78, 118), lay.battlegroups_btn, border_radius=10)
+    pygame.draw.rect(surf, (150, 185, 235), lay.battlegroups_btn, width=2, border_radius=10)
+    bb = font.render("PvP battlegroups", True, (235, 242, 255))
+    surf.blit(
+        bb,
+        (
+            lay.battlegroups_btn.centerx - bb.get_width() // 2,
+            lay.battlegroups_btn.centery - bb.get_height() // 2,
+        ),
+    )
+
     pygame.draw.rect(surf, (52, 72, 108), lay.multiplayer_btn, border_radius=10)
     pygame.draw.rect(surf, (140, 170, 220), lay.multiplayer_btn, width=2, border_radius=10)
     bm = font.render("Multiplayer (stub)", True, (235, 242, 255))
@@ -3599,11 +3688,194 @@ def draw_config_menu(
     )
 
     foot = font_tiny.render(
-        "ENTER — design fleet   F8 — voice test   Click/drag volume   Ctrl+Q — quit",
+        "ENTER — design fleet   F8 — voice test   Click PvP battlegroups to edit deploy presets",
         True,
         (140, 160, 178),
     )
     surf.blit(foot, (lay.panel.centerx - foot.get_width() // 2, lay.panel.bottom + 14))
+
+
+BATTLEGROUP_ENTRY_TAGS: Tuple[str, ...] = ("spawn_edge", "spawn_left", "spawn_right")
+
+
+@dataclass
+class BattlegroupEditorLayout:
+    panel: pygame.Rect
+    list_rect: pygame.Rect
+    btn_back: pygame.Rect
+    btn_save: pygame.Rect
+    btn_new: pygame.Rect
+    btn_del: pygame.Rect
+    fld_name: pygame.Rect
+    fld_id: pygame.Rect
+    fld_cost: pygame.Rect
+    btn_tag_prev: pygame.Rect
+    btn_tag_next: pygame.Rect
+    tag_readout: pygame.Rect
+    row_area: pygame.Rect
+    lbl_ship: pygame.Rect
+    ship_prev: pygame.Rect
+    ship_next: pygame.Rect
+    btn_add: pygame.Rect
+    btn_rm: pygame.Rect
+
+
+def battlegroup_editor_layout() -> BattlegroupEditorLayout:
+    m = 18
+    panel = pygame.Rect(m, m, WIDTH - 2 * m, HEIGHT - 2 * m)
+    split_x = panel.x + int(panel.w * 0.36)
+    list_rect = pygame.Rect(panel.x + 12, panel.y + 52, split_x - panel.x - 20, panel.h - 100)
+    footer_y = panel.bottom - 46
+    btn_back = pygame.Rect(panel.x + 12, footer_y, 100, 36)
+    btn_save = pygame.Rect(btn_back.right + 8, footer_y, 100, 36)
+    btn_new = pygame.Rect(btn_save.right + 8, footer_y, 100, 36)
+    btn_del = pygame.Rect(btn_new.right + 8, footer_y, 100, 36)
+    col = split_x + 6
+    dw = panel.right - col - 14
+    row0 = panel.y + 52
+    fld_name = pygame.Rect(col, row0, min(440, dw), 28)
+    fld_id = pygame.Rect(col, row0 + 34, min(360, dw), 28)
+    fld_cost = pygame.Rect(col, row0 + 68, 90, 28)
+    btn_tag_prev = pygame.Rect(fld_cost.right + 10, row0 + 68, 32, 28)
+    tag_readout = pygame.Rect(btn_tag_prev.right + 6, row0 + 68, min(220, dw - 200), 28)
+    btn_tag_next = pygame.Rect(tag_readout.right + 6, row0 + 68, 32, 28)
+    row_top = row0 + 108
+    row_area = pygame.Rect(col, row_top, dw, max(120, footer_y - row_top - 44))
+    ship_y = row_area.bottom + 8
+    lbl_ship = pygame.Rect(col, ship_y, min(340, dw - 140), 26)
+    ship_prev = pygame.Rect(lbl_ship.right + 6, ship_y, 30, 26)
+    ship_next = pygame.Rect(ship_prev.right + 4, ship_y, 30, 26)
+    btn_add = pygame.Rect(ship_next.right + 10, ship_y, 92, 26)
+    btn_rm = pygame.Rect(btn_add.right + 8, ship_y, 92, 26)
+    return BattlegroupEditorLayout(
+        panel,
+        list_rect,
+        btn_back,
+        btn_save,
+        btn_new,
+        btn_del,
+        fld_name,
+        fld_id,
+        fld_cost,
+        btn_tag_prev,
+        btn_tag_next,
+        tag_readout,
+        row_area,
+        lbl_ship,
+        ship_prev,
+        ship_next,
+        btn_add,
+        btn_rm,
+    )
+
+
+def draw_battlegroup_editor(
+    surf: pygame.Surface,
+    font: pygame.font.Font,
+    font_tiny: pygame.font.Font,
+    font_big: pygame.font.Font,
+    *,
+    presets: List[BattlegroupPreset],
+    selected_i: int,
+    list_scroll: int,
+    row_scroll: int,
+    name_buf: str,
+    id_buf: str,
+    cost_buf: str,
+    entry_tag: str,
+    rows: List[Dict[str, str]],
+    ship_pick_i: int,
+    cap_names: List[str],
+    save_path: str,
+    focus: Optional[str],
+) -> None:
+    lay = battlegroup_editor_layout()
+    pygame.draw.rect(surf, (6, 12, 22), lay.panel, border_radius=14)
+    pygame.draw.rect(surf, (55, 95, 130), lay.panel, width=2, border_radius=14)
+    title = font_big.render("PvP battlegroup presets", True, (230, 240, 250))
+    surf.blit(title, (lay.panel.centerx - title.get_width() // 2, lay.panel.y + 14))
+    sub = font_tiny.render(
+        "Saved for deploy costs in PvP — edit ships like fleet design (capital classes only).",
+        True,
+        (155, 175, 198),
+    )
+    surf.blit(sub, (lay.panel.centerx - sub.get_width() // 2, lay.panel.y + 38))
+
+    pygame.draw.rect(surf, (14, 22, 36), lay.list_rect, border_radius=8)
+    pygame.draw.rect(surf, (55, 80, 110), lay.list_rect, width=1, border_radius=8)
+    lh = 26
+    for j, pr in enumerate(presets):
+        ry = lay.list_rect.y + 6 + j * lh - list_scroll
+        if ry + lh < lay.list_rect.y or ry > lay.list_rect.bottom:
+            continue
+        sel = j == selected_i
+        rr = pygame.Rect(lay.list_rect.x + 4, ry, lay.list_rect.w - 8, lh - 2)
+        if sel:
+            pygame.draw.rect(surf, (45, 78, 108), rr, border_radius=4)
+        t = font_tiny.render(f"{pr.name}  ({pr.preset_id})  cost {pr.deploy_cost}", True, (210, 220, 235))
+        surf.blit(t, (rr.x + 6, rr.y + 4))
+
+    def _btn(r: pygame.Rect, lab: str, hot: bool = False) -> None:
+        bg = (48, 68, 92) if not hot else (62, 88, 118)
+        pygame.draw.rect(surf, bg, r, border_radius=6)
+        pygame.draw.rect(surf, (120, 160, 200), r, width=1, border_radius=6)
+        ts = font_tiny.render(lab, True, (235, 242, 250))
+        surf.blit(ts, (r.centerx - ts.get_width() // 2, r.centery - ts.get_height() // 2))
+
+    _btn(lay.btn_back, "Back")
+    _btn(lay.btn_save, "Save")
+    _btn(lay.btn_new, "New")
+    _btn(lay.btn_del, "Delete")
+
+    def _field(r: pygame.Rect, text: str, active: bool, placeholder: str) -> None:
+        pygame.draw.rect(surf, (20, 30, 46), r, border_radius=4)
+        pygame.draw.rect(surf, (130, 190, 230) if active else (70, 100, 130), r, width=1, border_radius=4)
+        disp = text if text else placeholder
+        col = (210, 220, 235) if text else (110, 125, 145)
+        surf.blit(font_tiny.render(disp, True, col), (r.x + 6, r.y + 5))
+
+    surf.blit(font_tiny.render("Display name", True, (170, 190, 210)), (lay.fld_name.x, lay.fld_name.y - 14))
+    _field(lay.fld_name, name_buf, focus == "name", "e.g. Carrier strike")
+    surf.blit(font_tiny.render("Preset id (unique key)", True, (170, 190, 210)), (lay.fld_id.x, lay.fld_id.y - 14))
+    _field(lay.fld_id, id_buf, focus == "id", "e.g. carrier_ball")
+    surf.blit(font_tiny.render("Deploy cost", True, (170, 190, 210)), (lay.fld_cost.x, lay.fld_cost.y - 14))
+    _field(lay.fld_cost, cost_buf, focus == "cost", "0")
+
+    _btn(lay.btn_tag_prev, "<")
+    pygame.draw.rect(surf, (18, 28, 42), lay.tag_readout, border_radius=4)
+    pygame.draw.rect(surf, (70, 100, 130), lay.tag_readout, width=1, border_radius=4)
+    surf.blit(
+        font_tiny.render(f"Entry: {entry_tag}", True, (195, 210, 228)),
+        (lay.tag_readout.x + 6, lay.tag_readout.y + 5),
+    )
+    _btn(lay.btn_tag_next, ">")
+
+    pygame.draw.rect(surf, (14, 22, 36), lay.row_area, border_radius=8)
+    pygame.draw.rect(surf, (55, 80, 110), lay.row_area, width=1, border_radius=8)
+    rh = 22
+    for j, row in enumerate(rows):
+        ry = lay.row_area.y + 6 + j * rh - row_scroll
+        if ry + rh < lay.row_area.y or ry > lay.row_area.bottom:
+            continue
+        cls = str(row.get("class_name") or "?")
+        lbl = str(row.get("label") or "")
+        line = f"{j + 1}. {cls}" + (f"  ({lbl})" if lbl else "")
+        surf.blit(font_tiny.render(line, True, (200, 215, 230)), (lay.row_area.x + 8, ry + 3))
+
+    ship_name = cap_names[ship_pick_i] if cap_names and 0 <= ship_pick_i < len(cap_names) else "—"
+    pygame.draw.rect(surf, (22, 32, 48), lay.lbl_ship, border_radius=4)
+    pygame.draw.rect(surf, (75, 105, 135), lay.lbl_ship, width=1, border_radius=4)
+    surf.blit(font_tiny.render(f"Add: {ship_name}", True, (210, 220, 235)), (lay.lbl_ship.x + 6, lay.lbl_ship.y + 4))
+    _btn(lay.ship_prev, "<", False)
+    _btn(lay.ship_next, ">", False)
+    _btn(lay.btn_add, "Add ship")
+    _btn(lay.btn_rm, "Rm last")
+
+    path_short = save_path if len(save_path) < 72 else "…" + save_path[-68:]
+    surf.blit(
+        font_tiny.render(f"File: {path_short}", True, (120, 140, 162)),
+        (lay.panel.x + 12, lay.panel.bottom - 68),
+    )
 
 
 def draw_mp_hub(
@@ -3998,6 +4270,18 @@ def run() -> None:
     mp_chat_log: List[str] = []
     mp_chat_input: str = ""
     mp_chat_focus: bool = False
+    bg_editor_path: str = ""
+    bg_editor_presets: List[BattlegroupPreset] = []
+    bg_editor_selected_i: int = 0
+    bg_editor_list_scroll: int = 0
+    bg_editor_row_scroll: int = 0
+    bg_editor_focus: Optional[str] = None
+    bg_editor_name_buf: str = ""
+    bg_editor_id_buf: str = ""
+    bg_editor_cost_buf: str = ""
+    bg_editor_entry_i: int = 0
+    bg_editor_rows: List[Dict[str, str]] = []
+    bg_editor_ship_pick_i: int = 0
     remote_ready: Dict[str, bool] = {}
     mp_match_generation = 0
     mp_applied_remote_start_gen = 0
@@ -4214,10 +4498,27 @@ def run() -> None:
             if mp_player_name not in players:
                 players.insert(0, mp_player_name)
             ax0, ay0 = deploy_anchor_xy()
+            pvp_total = max(1, min(len(players), 8))
+            pvp_left = max(1, (pvp_total + 1) // 2)
+
+            def pvp_spawn_anchor(i: int) -> Tuple[float, float]:
+                if i < pvp_left:
+                    li = i
+                    lx = WORLD_W * 0.20 + (li % 2) * 210.0
+                    ly = WORLD_H * 0.36 + (li // 2) * 210.0
+                    return lx, ly
+                ri = i - pvp_left
+                rx = WORLD_W * 0.80 - (ri % 2) * 210.0
+                ry = WORLD_H * 0.36 + (ri // 2) * 210.0
+                return rx, ry
+
             for i, pname in enumerate(players[:8]):
                 cid = int(max(0, min(int(colors.get(pname, 0)), 5)))
                 rows = designs.get(pname) if isinstance(designs, dict) else None
-                anchor = (ax0 - 520 + (i % 4) * 320.0, ay0 - 180 + (i // 4) * 360.0)
+                if mp_mode_coop:
+                    anchor = (ax0 - 520 + (i % 4) * 320.0, ay0 - 180 + (i // 4) * 360.0)
+                else:
+                    anchor = pvp_spawn_anchor(i)
                 ng, nc = build_player_fleet_from_design(
                     data,
                     owner_id=pname,
@@ -4231,11 +4532,29 @@ def run() -> None:
         else:
             groups[:] = list(mp_fleet_groups)
             crafts[:] = list(mp_fleet_crafts)
+        _mp_online_lobby = bool(NET_MP and remote_lobby_id and mp_relay is not None and not mp_relay.error)
         clear_selection(groups)
         clear_craft_selection(crafts)
-        roster = loadout_player_capitals_sorted(groups)
-        if roster:
-            roster[0].selected = True
+        if _mp_online_lobby:
+            _picked_self = False
+            for g in groups:
+                if (
+                    g.side == "player"
+                    and not g.dead
+                    and g.render_capital
+                    and getattr(g, "owner_id", "") == mp_player_name
+                ):
+                    g.selected = True
+                    _picked_self = True
+                    break
+            if not _picked_self:
+                roster = loadout_player_capitals_sorted(groups)
+                if roster:
+                    roster[0].selected = True
+        else:
+            roster = loadout_player_capitals_sorted(groups)
+            if roster:
+                roster[0].selected = True
         obs = battle_obstacles if mp_use_asteroids else []
         rng_seed = int(match_seed) if match_seed is not None else round_seed(mp_round_idx)
         mission = begin_combat_round(
@@ -4245,11 +4564,33 @@ def run() -> None:
             random.Random(rng_seed),
             obs,
             enemy_pressure=mp_enemy_pressure,
+            mp_pvp=not mp_mode_coop,
         )
+        if getattr(mission, "mp_pvp", False):
+            owners = sorted(
+                {
+                    str(getattr(g, "owner_id", "")).strip()
+                    for g in groups
+                    if g.side == "player" and str(getattr(g, "owner_id", "")).strip()
+                }
+            )
+            mission.pvp_scrap = {o: 0 for o in owners}
+            mission.pvp_territory = {}
+            mission.pvp_battlegroups = {}
         snap_strike_crafts_to_carriers(crafts)
         cam_x, cam_y = initial_camera_for_fleet(groups)
         control_groups[:] = [None] * CONTROL_GROUP_SLOTS
-        control_groups[0] = all_player_capital_labels(groups)
+        if _mp_online_lobby:
+            control_groups[0] = [
+                g.label
+                for g in groups
+                if g.side == "player"
+                and not g.dead
+                and g.render_capital
+                and getattr(g, "owner_id", "") == mp_player_name
+            ]
+        else:
+            control_groups[0] = all_player_capital_labels(groups)
         fog = FogState()
         active_pings.clear()
         sensor_ghosts.clear()
@@ -4448,6 +4789,17 @@ def run() -> None:
     def mp_sel_craft_labels() -> List[str]:
         return [c.label for c in crafts if c.owner_id == mp_player_name and c.selected and not c.dead]
 
+    def _mp_owned_pick_owner() -> Optional[str]:
+        return mp_player_name if mp_net_combat_active() else None
+
+    def _mp_pick_hostile_kwargs() -> Dict[str, Any]:
+        if not mp_net_combat_active():
+            return {}
+        return {
+            "viewer_owner": mp_player_name,
+            "mp_pvp": bool(getattr(mission, "mp_pvp", False)) if mission is not None else False,
+        }
+
     _hub_debug_log = os.environ.get("FLEETRTS_DEBUG_LOG", "").strip()
     _hub_http_disabled = os.environ.get("FLEETRTS_HUB_DISABLE_HTTP", "").strip().lower() in ("1", "true", "yes")
 
@@ -4460,6 +4812,95 @@ def run() -> None:
         )
 
     mp_hub_debug_frames = 0
+
+    cap_names_menu = capital_ship_class_names(data)
+    if not cap_names_menu:
+        cap_names_menu = ["Destroyer"]
+
+    def _bg_entry_idx_from_tag(tag: str) -> int:
+        t = str(tag or "").strip()
+        if t in BATTLEGROUP_ENTRY_TAGS:
+            return list(BATTLEGROUP_ENTRY_TAGS).index(t)
+        return 0
+
+    def _bg_sync_from_selection() -> None:
+        nonlocal bg_editor_name_buf, bg_editor_id_buf, bg_editor_cost_buf, bg_editor_entry_i, bg_editor_rows
+        nonlocal bg_editor_selected_i
+        if not bg_editor_presets:
+            bg_editor_name_buf = ""
+            bg_editor_id_buf = ""
+            bg_editor_cost_buf = "0"
+            bg_editor_entry_i = 0
+            bg_editor_rows = []
+            return
+        bg_editor_selected_i = max(0, min(bg_editor_selected_i, len(bg_editor_presets) - 1))
+        p = bg_editor_presets[bg_editor_selected_i]
+        bg_editor_name_buf = p.name
+        bg_editor_id_buf = p.preset_id
+        bg_editor_cost_buf = str(int(p.deploy_cost))
+        bg_editor_entry_i = _bg_entry_idx_from_tag(p.entry_tag)
+        bg_editor_rows = [
+            {"class_name": str(r.get("class_name", "")), "label": str(r.get("label", ""))} for r in p.design_rows
+        ]
+
+    def _bg_sync_to_selection() -> None:
+        if not bg_editor_presets or bg_editor_selected_i < 0 or bg_editor_selected_i >= len(bg_editor_presets):
+            return
+        p = bg_editor_presets[bg_editor_selected_i]
+        name = bg_editor_name_buf.strip() or p.name
+        pid = bg_editor_id_buf.strip() or p.preset_id
+        cost_raw = bg_editor_cost_buf.strip()
+        try:
+            cost = max(0, int(cost_raw))
+        except ValueError:
+            cost = p.deploy_cost
+        tag = BATTLEGROUP_ENTRY_TAGS[max(0, min(bg_editor_entry_i, len(BATTLEGROUP_ENTRY_TAGS) - 1))]
+        p.name = name
+        p.preset_id = pid
+        p.deploy_cost = cost
+        p.entry_tag = tag
+        clean_rows: List[Dict[str, str]] = []
+        for r in bg_editor_rows:
+            cname = str(r.get("class_name") or "").strip()
+            if not cname:
+                continue
+            try:
+                ship_class_by_name(data, cname)
+            except KeyError:
+                continue
+            clean_rows.append({"class_name": cname, "label": str(r.get("label") or "").strip()})
+        p.design_rows = clean_rows
+
+    def enter_battlegroup_editor() -> None:
+        nonlocal phase, bg_editor_path, bg_editor_presets, bg_editor_selected_i
+        nonlocal bg_editor_list_scroll, bg_editor_row_scroll, bg_editor_focus
+        bg_editor_path = default_battlegroups_path()
+        bg_editor_presets = load_battlegroups(bg_editor_path)
+        if not bg_editor_presets:
+            fc = cap_names_menu[0]
+            bg_editor_presets = [
+                BattlegroupPreset(
+                    preset_id="preset_1",
+                    name="First battlegroup",
+                    deploy_cost=0,
+                    design_rows=[{"class_name": fc, "label": ""}],
+                    entry_tag=str(BATTLEGROUP_ENTRY_TAGS[0]),
+                )
+            ]
+        bg_editor_selected_i = 0
+        bg_editor_list_scroll = 0
+        bg_editor_row_scroll = 0
+        bg_editor_focus = None
+        _bg_sync_from_selection()
+        phase = "battlegroup_editor"
+
+    def exit_battlegroup_editor(*, save_first: bool) -> None:
+        nonlocal phase, bg_editor_focus
+        if save_first:
+            _bg_sync_to_selection()
+            save_battlegroups(bg_editor_path, bg_editor_presets)
+        bg_editor_focus = None
+        phase = "config"
 
     running = True
     while running:
@@ -4630,6 +5071,9 @@ def run() -> None:
                 if lay.design_fleet_btn.collidepoint(mx, my):
                     enter_ship_loadouts()
                     audio.play_positive()
+                elif lay.battlegroups_btn.collidepoint(mx, my):
+                    enter_battlegroup_editor()
+                    audio.play_positive()
                 elif lay.multiplayer_btn.collidepoint(mx, my):
                     phase = "mp_hub"
                     mp_net_err = None
@@ -4658,6 +5102,124 @@ def run() -> None:
                 if config_volume_drag and pygame.mouse.get_pressed()[0]:
                     mx, my = to_internal(event.pos)
                     _config_volume_from_mouse_x(config_menu_layout().volume_track, mx, audio)
+            elif phase == "battlegroup_editor" and event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    exit_battlegroup_editor(save_first=True)
+                    audio.play_positive()
+                elif event.key == pygame.K_TAB:
+                    if bg_editor_focus == "name":
+                        bg_editor_focus = "id"
+                    elif bg_editor_focus == "id":
+                        bg_editor_focus = "cost"
+                    else:
+                        bg_editor_focus = "name"
+                    audio.play_positive()
+                elif bg_editor_focus == "name":
+                    if event.key == pygame.K_BACKSPACE:
+                        bg_editor_name_buf = bg_editor_name_buf[:-1]
+                    elif event.unicode and event.unicode.isprintable() and len(bg_editor_name_buf) < 48:
+                        bg_editor_name_buf += event.unicode
+                elif bg_editor_focus == "id":
+                    if event.key == pygame.K_BACKSPACE:
+                        bg_editor_id_buf = bg_editor_id_buf[:-1]
+                    elif event.unicode and event.unicode.isprintable() and len(bg_editor_id_buf) < 40:
+                        ch = event.unicode
+                        if ch.isalnum() or ch in ("_", "-"):
+                            bg_editor_id_buf += ch
+                elif bg_editor_focus == "cost":
+                    if event.key == pygame.K_BACKSPACE:
+                        bg_editor_cost_buf = bg_editor_cost_buf[:-1]
+                    elif event.unicode and event.unicode.isdigit() and len(bg_editor_cost_buf) < 9:
+                        bg_editor_cost_buf += event.unicode
+            elif phase == "battlegroup_editor" and event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = to_internal(event.pos)
+                el = battlegroup_editor_layout()
+                if el.btn_back.collidepoint(mx, my):
+                    exit_battlegroup_editor(save_first=True)
+                    audio.play_positive()
+                elif el.btn_save.collidepoint(mx, my):
+                    _bg_sync_to_selection()
+                    save_battlegroups(bg_editor_path, bg_editor_presets)
+                    audio.play_positive()
+                elif el.btn_new.collidepoint(mx, my):
+                    _bg_sync_to_selection()
+                    nn = len(bg_editor_presets) + 1
+                    fc = cap_names_menu[0]
+                    bg_editor_presets.append(
+                        BattlegroupPreset(
+                            preset_id=f"preset_{nn}",
+                            name=f"Battlegroup {nn}",
+                            deploy_cost=0,
+                            design_rows=[{"class_name": fc, "label": ""}],
+                            entry_tag=str(BATTLEGROUP_ENTRY_TAGS[0]),
+                        )
+                    )
+                    bg_editor_selected_i = len(bg_editor_presets) - 1
+                    _bg_sync_from_selection()
+                    audio.play_positive()
+                elif el.btn_del.collidepoint(mx, my):
+                    if bg_editor_presets:
+                        _bg_sync_to_selection()
+                        del bg_editor_presets[bg_editor_selected_i]
+                        if not bg_editor_presets:
+                            fc = cap_names_menu[0]
+                            bg_editor_presets = [
+                                BattlegroupPreset(
+                                    preset_id="preset_1",
+                                    name="First battlegroup",
+                                    deploy_cost=0,
+                                    design_rows=[{"class_name": fc, "label": ""}],
+                                    entry_tag=str(BATTLEGROUP_ENTRY_TAGS[0]),
+                                )
+                            ]
+                            bg_editor_selected_i = 0
+                        else:
+                            bg_editor_selected_i = min(bg_editor_selected_i, len(bg_editor_presets) - 1)
+                        _bg_sync_from_selection()
+                    audio.play_positive()
+                elif el.fld_name.collidepoint(mx, my):
+                    bg_editor_focus = "name"
+                elif el.fld_id.collidepoint(mx, my):
+                    bg_editor_focus = "id"
+                elif el.fld_cost.collidepoint(mx, my):
+                    bg_editor_focus = "cost"
+                elif el.btn_tag_prev.collidepoint(mx, my):
+                    bg_editor_entry_i = (bg_editor_entry_i - 1) % len(BATTLEGROUP_ENTRY_TAGS)
+                    audio.play_positive()
+                elif el.btn_tag_next.collidepoint(mx, my):
+                    bg_editor_entry_i = (bg_editor_entry_i + 1) % len(BATTLEGROUP_ENTRY_TAGS)
+                    audio.play_positive()
+                elif el.list_rect.collidepoint(mx, my):
+                    lh = 26
+                    rel = my - el.list_rect.y - 6 + bg_editor_list_scroll
+                    idx = rel // lh
+                    if 0 <= idx < len(bg_editor_presets):
+                        _bg_sync_to_selection()
+                        bg_editor_selected_i = idx
+                        _bg_sync_from_selection()
+                        audio.play_positive()
+                elif el.ship_prev.collidepoint(mx, my):
+                    bg_editor_ship_pick_i = (bg_editor_ship_pick_i - 1) % len(cap_names_menu)
+                    audio.play_positive()
+                elif el.ship_next.collidepoint(mx, my):
+                    bg_editor_ship_pick_i = (bg_editor_ship_pick_i + 1) % len(cap_names_menu)
+                    audio.play_positive()
+                elif el.btn_add.collidepoint(mx, my):
+                    cnm = cap_names_menu[bg_editor_ship_pick_i % len(cap_names_menu)]
+                    bg_editor_rows.append({"class_name": cnm, "label": ""})
+                    audio.play_positive()
+                elif el.btn_rm.collidepoint(mx, my):
+                    if bg_editor_rows:
+                        bg_editor_rows.pop()
+                    audio.play_positive()
+            elif phase == "battlegroup_editor" and event.type == pygame.MOUSEWHEEL:
+                imx, imy = to_internal(pygame.mouse.get_pos())
+                elw = battlegroup_editor_layout()
+                d = -int(round(event.y)) * 24
+                if elw.list_rect.collidepoint(imx, imy):
+                    bg_editor_list_scroll = max(0, bg_editor_list_scroll + d)
+                elif elw.row_area.collidepoint(imx, imy):
+                    bg_editor_row_scroll = max(0, bg_editor_row_scroll + d)
             elif phase == "mp_hub" and event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     phase = "config"
@@ -4901,57 +5463,52 @@ def run() -> None:
                     audio.play_positive()
                 elif layl.btn_start.collidepoint(mx, my):
                     if mp_lobby_host and mp_ready:
-                        if not mp_mode_coop:
-                            mp_toast_text = "PvP is not implemented — set Mode to Co-op vs AI."
-                            mp_toast_until_ms = pygame.time.get_ticks() + 3400
-                            audio.play_negative()
-                        else:
-                            if remote_lobby_id and mp_relay is not None and not mp_relay.error:
-                                blocking = [
-                                    p
-                                    for p in remote_relay_players
-                                    if p != mp_player_name and remote_loadouts.get(p, False)
-                                ]
-                                if blocking:
-                                    tail = ", ".join(blocking[:4])
-                                    if len(blocking) > 4:
-                                        tail += ", …"
-                                    mp_toast_text = f"Can't start — in fleet design: {tail}"
-                                    mp_toast_until_ms = pygame.time.get_ticks() + 5200
-                                    audio.play_negative()
-                                else:
-                                    mp_match_generation += 1
-                                    mgen = mp_match_generation
-                                    mseed = random.randint(1, 2**31 - 1)
-                                    _players = [p for p in remote_relay_players if isinstance(p, str) and p.strip()]
-                                    if mp_player_name not in _players:
-                                        _players.insert(0, mp_player_name)
-                                    _colors: Dict[str, int] = {mp_player_name: int(mp_player_color_id)}
-                                    for _pn, _cid in remote_player_colors.items():
-                                        _colors[str(_pn)] = int(max(0, min(int(_cid), 5)))
-                                    _designs: Dict[str, List[Dict[str, str]]] = {
-                                        mp_player_name: export_player_fleet_design(mp_fleet_groups)
-                                    }
-                                    for _pn, _rows in mp_player_fleet_designs.items():
-                                        if isinstance(_rows, list):
-                                            _designs[str(_pn)] = _rows
-                                    _setup = {"players": _players, "colors": _colors, "designs": _designs}
-                                    mp_relay.send_payload(
-                                        start_match(
-                                            generation=mgen,
-                                            seed=mseed,
-                                            round_idx=mp_round_idx,
-                                            coop=mp_mode_coop,
-                                            use_asteroids=mp_use_asteroids,
-                                            enemy_pressure=mp_enemy_pressure,
-                                            player_setup=_setup,
-                                        )
-                                    )
-                                    launch_mp_combat(mseed, _setup)
-                                    audio.play_positive()
+                        if remote_lobby_id and mp_relay is not None and not mp_relay.error:
+                            blocking = [
+                                p
+                                for p in remote_relay_players
+                                if p != mp_player_name and remote_loadouts.get(p, False)
+                            ]
+                            if blocking:
+                                tail = ", ".join(blocking[:4])
+                                if len(blocking) > 4:
+                                    tail += ", …"
+                                mp_toast_text = f"Can't start — in fleet design: {tail}"
+                                mp_toast_until_ms = pygame.time.get_ticks() + 5200
+                                audio.play_negative()
                             else:
-                                launch_mp_combat()
+                                mp_match_generation += 1
+                                mgen = mp_match_generation
+                                mseed = random.randint(1, 2**31 - 1)
+                                _players = [p for p in remote_relay_players if isinstance(p, str) and p.strip()]
+                                if mp_player_name not in _players:
+                                    _players.insert(0, mp_player_name)
+                                _colors: Dict[str, int] = {mp_player_name: int(mp_player_color_id)}
+                                for _pn, _cid in remote_player_colors.items():
+                                    _colors[str(_pn)] = int(max(0, min(int(_cid), 5)))
+                                _designs: Dict[str, List[Dict[str, str]]] = {
+                                    mp_player_name: export_player_fleet_design(mp_fleet_groups)
+                                }
+                                for _pn, _rows in mp_player_fleet_designs.items():
+                                    if isinstance(_rows, list):
+                                        _designs[str(_pn)] = _rows
+                                _setup = {"players": _players, "colors": _colors, "designs": _designs}
+                                mp_relay.send_payload(
+                                    start_match(
+                                        generation=mgen,
+                                        seed=mseed,
+                                        round_idx=mp_round_idx,
+                                        coop=mp_mode_coop,
+                                        use_asteroids=mp_use_asteroids,
+                                        enemy_pressure=mp_enemy_pressure,
+                                        player_setup=_setup,
+                                    )
+                                )
+                                launch_mp_combat(mseed, _setup)
                                 audio.play_positive()
+                        else:
+                            launch_mp_combat()
+                            audio.play_positive()
                     else:
                         audio.play_negative()
                 elif mp_lobby_host:
@@ -5273,12 +5830,17 @@ def run() -> None:
                             running = False
                 elif event.type == pygame.KEYDOWN:
                     mods = pygame.key.get_mods()
+                    mp_own_k = _mp_owned_pick_owner()
                     if mods & pygame.KMOD_CTRL and pygame.K_1 <= event.key <= pygame.K_9:
                         slot = event.key - pygame.K_1
                         sel = [
                             g
                             for g in groups
-                            if g.side == "player" and g.selected and not g.dead and g.render_capital
+                            if g.side == "player"
+                            and g.selected
+                            and not g.dead
+                            and g.render_capital
+                            and (mp_own_k is None or getattr(g, "owner_id", "") == mp_own_k)
                         ]
                         if sel:
                             labs = [g.label for g in sel]
@@ -5300,6 +5862,7 @@ def run() -> None:
                                 and not g.dead
                                 and g.render_capital
                                 and g.label in labels
+                                and (mp_own_k is None or getattr(g, "owner_id", "") == mp_own_k)
                             ]
                             if picked:
                                 if mods & pygame.KMOD_SHIFT:
@@ -5307,9 +5870,24 @@ def run() -> None:
                                 else:
                                     set_selection(groups, picked)
                     elif event.key == pygame.K_HOME:
-                        sel_cam = [g for g in groups if g.side == "player" and g.selected and not g.dead and g.render_capital]
+                        sel_cam = [
+                            g
+                            for g in groups
+                            if g.side == "player"
+                            and g.selected
+                            and not g.dead
+                            and g.render_capital
+                            and (mp_own_k is None or getattr(g, "owner_id", "") == mp_own_k)
+                        ]
                         if not sel_cam:
-                            sel_cam = [g for g in groups if g.side == "player" and not g.dead and g.render_capital]
+                            sel_cam = [
+                                g
+                                for g in groups
+                                if g.side == "player"
+                                and not g.dead
+                                and g.render_capital
+                                and (mp_own_k is None or getattr(g, "owner_id", "") == mp_own_k)
+                            ]
                         cam_x, cam_y = focus_camera_for_selection(cam_x, cam_y, sel_cam)
                     elif event.key == pygame.K_h:
                         if mp_is_net_client():
@@ -5323,6 +5901,8 @@ def run() -> None:
                         else:
                             for g in groups:
                                 if g.side != "player" or g.dead or not g.selected:
+                                    continue
+                                if mp_own_k is not None and getattr(g, "owner_id", "") != mp_own_k:
                                     continue
                                 g.hold_position()
                                 if g.class_name == "Carrier":
@@ -5349,11 +5929,22 @@ def run() -> None:
                             mp_send_client("formation_cycle", {})
                         formation_mode = (formation_mode + 1) % 3
                     elif event.key == pygame.K_f:
-                        sel = [g for g in groups if g.side == "player" and g.selected and not g.dead]
+                        sel = [
+                            g
+                            for g in groups
+                            if g.side == "player"
+                            and g.selected
+                            and not g.dead
+                            and (mp_own_k is None or getattr(g, "owner_id", "") == mp_own_k)
+                        ]
                         wing_sel = [
                             c
                             for c in crafts
-                            if c.side == "player" and c.selected and not c.dead and c.parent.class_name == "Carrier"
+                            if c.side == "player"
+                            and c.selected
+                            and not c.dead
+                            and c.parent.class_name == "Carrier"
+                            and (mp_own_k is None or getattr(c, "owner_id", "") == mp_own_k)
                         ]
                         fight_w = any(c.class_name in ("Fighter", "Interceptor") for c in wing_sel)
                         bomb_w = any(c.class_name == "Bomber" for c in wing_sel)
@@ -5392,7 +5983,12 @@ def run() -> None:
                             )
                         else:
                             for g in groups:
-                                if g.side == "player" and g.selected and g.class_name == "Carrier":
+                                if (
+                                    g.side == "player"
+                                    and g.selected
+                                    and g.class_name == "Carrier"
+                                    and (mp_own_k is None or getattr(g, "owner_id", "") == mp_own_k)
+                                ):
                                     clear_carrier_air_orders(g)
                         awaiting_bomber_order_click = False
                         awaiting_fighter_order_click = False
@@ -5423,10 +6019,10 @@ def run() -> None:
                             audio.play_negative()
                     elif event.key == pygame.K_7:
                         sh = pygame.key.get_pressed()[pygame.K_LSHIFT] or pygame.key.get_pressed()[pygame.K_RSHIFT]
-                        select_strike_wing_for_carriers(crafts, groups, 0, sh)
+                        select_strike_wing_for_carriers(crafts, groups, 0, sh, mp_own_k)
                     elif event.key == pygame.K_8:
                         sh = pygame.key.get_pressed()[pygame.K_LSHIFT] or pygame.key.get_pressed()[pygame.K_RSHIFT]
-                        select_strike_wing_for_carriers(crafts, groups, 1, sh)
+                        select_strike_wing_for_carriers(crafts, groups, 1, sh, mp_own_k)
                     elif event.key == pygame.K_9:
                         clear_craft_selection(crafts)
                         awaiting_fighter_order_click = False
@@ -5439,6 +6035,7 @@ def run() -> None:
                     if my >= VIEW_H:
                         if event.button == 1:
                             hit_order = False
+                            mp_own_ord = _mp_owned_pick_owner()
                             if weapon_stance_toggle_rect().collidepoint(mx, my):
                                 if mp_is_net_client():
                                     mp_send_client(
@@ -5494,6 +6091,8 @@ def run() -> None:
                                                 for g in groups:
                                                     if g.side != "player" or g.dead or not g.selected:
                                                         continue
+                                                    if mp_own_ord is not None and getattr(g, "owner_id", "") != mp_own_ord:
+                                                        continue
                                                     g.hold_position()
                                                     if g.class_name == "Carrier":
                                                         clear_carrier_air_orders(g)
@@ -5509,7 +6108,14 @@ def run() -> None:
                                             formation_mode = (formation_mode + 1) % 3
                                             audio.play_positive()
                                         elif act == "strike":
-                                            ssel = [g for g in groups if g.side == "player" and g.selected and not g.dead]
+                                            ssel = [
+                                                g
+                                                for g in groups
+                                                if g.side == "player"
+                                                and g.selected
+                                                and not g.dead
+                                                and (mp_own_ord is None or getattr(g, "owner_id", "") == mp_own_ord)
+                                            ]
                                             wsel = [
                                                 c
                                                 for c in crafts
@@ -5517,6 +6123,7 @@ def run() -> None:
                                                 and c.selected
                                                 and not c.dead
                                                 and c.parent.class_name == "Carrier"
+                                                and (mp_own_ord is None or getattr(c, "owner_id", "") == mp_own_ord)
                                             ]
                                             fight_ws = any(
                                                 c.class_name in ("Fighter", "Interceptor") for c in wsel
@@ -5563,7 +6170,15 @@ def run() -> None:
                                                 )
                                             else:
                                                 for g in groups:
-                                                    if g.side == "player" and g.selected and g.class_name == "Carrier":
+                                                    if (
+                                                        g.side == "player"
+                                                        and g.selected
+                                                        and g.class_name == "Carrier"
+                                                        and (
+                                                            mp_own_ord is None
+                                                            or getattr(g, "owner_id", "") == mp_own_ord
+                                                        )
+                                                    ):
                                                         clear_carrier_air_orders(g)
                                             awaiting_bomber_order_click = False
                                             awaiting_fighter_order_click = False
@@ -5597,13 +6212,20 @@ def run() -> None:
                                             sel_cam = [
                                                 g
                                                 for g in groups
-                                                if g.side == "player" and g.selected and not g.dead and g.render_capital
+                                                if g.side == "player"
+                                                and g.selected
+                                                and not g.dead
+                                                and g.render_capital
+                                                and (mp_own_ord is None or getattr(g, "owner_id", "") == mp_own_ord)
                                             ]
                                             if not sel_cam:
                                                 sel_cam = [
                                                     g
                                                     for g in groups
-                                                    if g.side == "player" and not g.dead and g.render_capital
+                                                    if g.side == "player"
+                                                    and not g.dead
+                                                    and g.render_capital
+                                                    and (mp_own_ord is None or getattr(g, "owner_id", "") == mp_own_ord)
                                                 ]
                                             cam_x, cam_y = focus_camera_for_selection(cam_x, cam_y, sel_cam)
                                             audio.play_positive()
@@ -5620,6 +6242,7 @@ def run() -> None:
                                                 and not g.dead
                                                 and g.render_capital
                                                 and g.label in labels
+                                                and (mp_own_ord is None or getattr(g, "owner_id", "") == mp_own_ord)
                                             ]
                                             if picked:
                                                 if pygame.key.get_pressed()[pygame.K_LSHIFT] or pygame.key.get_pressed()[
@@ -5635,12 +6258,16 @@ def run() -> None:
                         if event.button == 1:
                             drag_anchor = (mx, my)
                         elif event.button == 3:
-                            sel = [g for g in groups if g.side == "player" and g.selected and not g.dead]
-                            sel_caps = [
+                            mp_own = _mp_owned_pick_owner()
+                            sel = [
                                 g
                                 for g in groups
-                                if g.side == "player" and g.selected and not g.dead and g.render_capital
+                                if g.side == "player"
+                                and g.selected
+                                and not g.dead
+                                and (mp_own is None or getattr(g, "owner_id", "") == mp_own)
                             ]
+                            sel_caps = [g for g in sel if g.render_capital]
                             wpx, wpy = screen_to_world_waypoint(float(mx), float(my), cam_x, cam_y)
                             now_rmb = pygame.time.get_ticks()
                             if my < VIEW_H:
@@ -5652,6 +6279,7 @@ def run() -> None:
                                 and c.selected
                                 and not c.dead
                                 and c.parent.class_name == "Carrier"
+                                and (mp_own is None or getattr(c, "owner_id", "") == mp_own)
                             ]
                             if awaiting_bomber_order_click and my < VIEW_H:
                                 eligible = any(g.class_name == "Carrier" for g in sel) or any(
@@ -5683,7 +6311,9 @@ def run() -> None:
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
                                 elif eligible:
-                                    mark = pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+                                    mark = pick_hostile_at(
+                                        groups, crafts, mx, my, cam_x, cam_y, **_mp_pick_hostile_kwargs()
+                                    )
                                     if mark is None:
                                         if (
                                             mission.kind == "strike"
@@ -5745,7 +6375,9 @@ def run() -> None:
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
                                 elif eligible:
-                                    mark = pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+                                    mark = pick_hostile_at(
+                                        groups, crafts, mx, my, cam_x, cam_y, **_mp_pick_hostile_kwargs()
+                                    )
                                     if mark is None:
                                         if (
                                             mission.kind == "strike"
@@ -5794,7 +6426,9 @@ def run() -> None:
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
                                 else:
-                                    mark = pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+                                    mark = pick_hostile_at(
+                                        groups, crafts, mx, my, cam_x, cam_y, **_mp_pick_hostile_kwargs()
+                                    )
                                     atk_set = False
                                     if mark is not None:
                                         for gc in sel_caps:
@@ -5875,10 +6509,15 @@ def run() -> None:
                             shift_down = pygame.key.get_pressed()[pygame.K_LSHIFT] or pygame.key.get_pressed()[
                                 pygame.K_RSHIFT
                             ]
+                            mp_own_up = _mp_owned_pick_owner()
                             sel_caps = [
                                 g
                                 for g in groups
-                                if g.side == "player" and g.selected and not g.dead and g.render_capital
+                                if g.side == "player"
+                                and g.selected
+                                and not g.dead
+                                and g.render_capital
+                                and (mp_own_up is None or getattr(g, "owner_id", "") == mp_own_up)
                             ]
                             mouse_done = False
                             now_ord = pygame.time.get_ticks()
@@ -5908,7 +6547,13 @@ def run() -> None:
                                             mouse_done = True
                                         else:
                                             mark = pick_hostile_at(
-                                                groups, crafts, mx, my, cam_x, cam_y
+                                                groups,
+                                                crafts,
+                                                mx,
+                                                my,
+                                                cam_x,
+                                                cam_y,
+                                                **_mp_pick_hostile_kwargs(),
                                             )
                                             ok_set = False
                                             if mark is not None:
@@ -5987,7 +6632,10 @@ def run() -> None:
                                 sel_ord = [
                                     g
                                     for g in groups
-                                    if g.side == "player" and g.selected and not g.dead
+                                    if g.side == "player"
+                                    and g.selected
+                                    and not g.dead
+                                    and (mp_own_up is None or getattr(g, "owner_id", "") == mp_own_up)
                                 ]
                                 sel_caps_ctx = [g for g in sel_ord if g.render_capital]
                                 if not sel_caps_ctx:
@@ -6014,7 +6662,13 @@ def run() -> None:
                                         float(mx), float(my), cam_x, cam_y
                                     )
                                     mark = pick_hostile_at(
-                                        groups, crafts, mx, my, cam_x, cam_y
+                                        groups,
+                                        crafts,
+                                        mx,
+                                        my,
+                                        cam_x,
+                                        cam_y,
+                                        **_mp_pick_hostile_kwargs(),
                                     )
                                     atk_set = False
                                     if mark is not None:
@@ -6070,13 +6724,22 @@ def run() -> None:
                                 sel_f = [
                                     g
                                     for g in groups
-                                    if g.side == "player" and g.selected and not g.dead
+                                    if g.side == "player"
+                                    and g.selected
+                                    and not g.dead
+                                    and (mp_own_up is None or getattr(g, "owner_id", "") == mp_own_up)
                                 ]
                                 wpx, wpy = screen_to_world_waypoint(
                                     float(mx), float(my), cam_x, cam_y
                                 )
                                 mark = pick_hostile_at(
-                                    groups, crafts, mx, my, cam_x, cam_y
+                                    groups,
+                                    crafts,
+                                    mx,
+                                    my,
+                                    cam_x,
+                                    cam_y,
+                                    **_mp_pick_hostile_kwargs(),
                                 )
                                 if mp_is_net_client():
                                     mp_send_client(
@@ -6150,7 +6813,7 @@ def run() -> None:
 
                             if not mouse_done and drag <= DRAG_CLICK_MAX_PX:
                                 c_hit = pick_player_craft_at(
-                                    crafts, mx, my, cam_x, cam_y, mp_player_name if mp_sync_match_active() else None
+                                    crafts, mx, my, cam_x, cam_y, _mp_owned_pick_owner()
                                 )
                                 if c_hit:
                                     if not shift_down:
@@ -6169,7 +6832,7 @@ def run() -> None:
                                     mouse_done = True
                                 if not mouse_done:
                                     hit = pick_player_capital_at(
-                                        groups, mx, my, cam_x, cam_y, mp_player_name if mp_sync_match_active() else None
+                                        groups, mx, my, cam_x, cam_y, _mp_owned_pick_owner()
                                     )
                                     now = pygame.time.get_ticks()
                                     if hit:
@@ -6178,11 +6841,13 @@ def run() -> None:
                                             and last_cap_click_label == hit.label
                                         ):
                                             clear_craft_selection(crafts)
-                                            select_all_same_class_visible(groups, hit.class_name, cam_x, cam_y)
+                                            select_all_same_class_visible(
+                                                groups, hit.class_name, cam_x, cam_y, _mp_owned_pick_owner()
+                                            )
                                             last_cap_click_t = -100000
                                             last_cap_click_label = None
                                         elif shift_down:
-                                            toggle_capital_in_selection(hit)
+                                            toggle_capital_in_selection(hit, _mp_owned_pick_owner())
                                             last_cap_click_t = -100000
                                             last_cap_click_label = None
                                         else:
@@ -6198,7 +6863,9 @@ def run() -> None:
                                             clear_craft_selection(crafts)
                             elif not mouse_done:
                                 rect = normalize_rect(x0, y0, mx, my)
-                                caps = player_capitals_in_rect(groups, rect, cam_x, cam_y)
+                                caps = player_capitals_in_rect(
+                                    groups, rect, cam_x, cam_y, _mp_owned_pick_owner()
+                                )
                                 if caps:
                                     if shift_down:
                                         add_to_selection(groups, caps)
@@ -6480,6 +7147,37 @@ def run() -> None:
             draw_config_menu(screen, font, font_tiny, font_big, audio)
             ch = font.render("Audio — ENTER or Design fleet · Multiplayer opens LAN-flow stub", True, (190, 210, 220))
             screen.blit(ch, (12, HEIGHT - 26))
+            _blit_internal_to_window(window, screen, win_w, win_h)
+            continue
+
+        if phase == "battlegroup_editor":
+            screen.fill((4, 12, 18))
+            draw_starfield(screen, stars, cam_x, cam_y, WIDTH, HEIGHT)
+            draw_world_edge(screen, cam_x, cam_y)
+            _et = BATTLEGROUP_ENTRY_TAGS[
+                max(0, min(bg_editor_entry_i, len(BATTLEGROUP_ENTRY_TAGS) - 1))
+            ]
+            draw_battlegroup_editor(
+                screen,
+                font,
+                font_tiny,
+                font_big,
+                presets=bg_editor_presets,
+                selected_i=bg_editor_selected_i,
+                list_scroll=bg_editor_list_scroll,
+                row_scroll=bg_editor_row_scroll,
+                name_buf=bg_editor_name_buf,
+                id_buf=bg_editor_id_buf,
+                cost_buf=bg_editor_cost_buf,
+                entry_tag=_et,
+                rows=bg_editor_rows,
+                ship_pick_i=bg_editor_ship_pick_i,
+                cap_names=cap_names_menu,
+                save_path=bg_editor_path,
+                focus=bg_editor_focus,
+            )
+            bh = font_tiny.render("ESC — save & back   Tab — cycle fields", True, (150, 170, 190))
+            screen.blit(bh, (12, HEIGHT - 26))
             _blit_internal_to_window(window, screen, win_w, win_h)
             continue
 
@@ -6952,6 +7650,8 @@ def run() -> None:
                     gshort = f"STRIKE — relay {mission.objective.hp:.0f}/{mission.objective.max_hp:.0f}"
                 else:
                     gshort = "STRIKE — destroy relay"
+            elif mission.kind == "pvp":
+                gshort = "PVP — eliminate enemy fleets"
             else:
                 gshort = f"SALVAGE — pods {mission.pods_collected}/{len(mission.pods)} (need {mission.pods_required})"
             st2 = font_micro.render(gshort, True, (145, 165, 188))

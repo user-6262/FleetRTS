@@ -60,6 +60,17 @@ def apply_combat_command(
     glab = [str(x) for x in (pl.get("group_labels") or [])]
     clab = [str(x) for x in (pl.get("craft_labels") or [])]
     sender = str(cmd.get("sender") or "").strip()
+    mpv = bool(getattr(mission, "mp_pvp", False))
+    _pick_hostile = lambda mx, my, cx, cy: dg.pick_hostile_at(
+        groups,
+        crafts,
+        int(mx),
+        int(my),
+        float(cx),
+        float(cy),
+        viewer_owner=sender if sender else None,
+        mp_pvp=mpv,
+    )
 
     def groups_pick() -> List[Any]:
         m = {g.label: g for g in groups}
@@ -105,7 +116,7 @@ def apply_combat_command(
             cam_x, cam_y = float(pl["cam_x"]), float(pl["cam_y"])
             mx, my = float(pl["mx"]), float(pl["my"])
             caps = [g for g in groups_pick() if g.render_capital]
-            mark = dg.pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+            mark = _pick_hostile(mx, my, cam_x, cam_y)
             if mark is None and mission.kind == "strike" and mission.objective and not mission.objective.dead:
                 if dg.pick_strike_objective_at(mission.objective, mx, my, cam_x, cam_y):
                     mark = mission.objective
@@ -120,7 +131,7 @@ def apply_combat_command(
             if not sel_caps_ctx:
                 return
             wpx, wpy = dg.screen_to_world_waypoint(mx, my, cam_x, cam_y)
-            mark = dg.pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+            mark = _pick_hostile(mx, my, cam_x, cam_y)
             atk_set = False
             if mark is not None:
                 for gc in sel_caps_ctx:
@@ -141,7 +152,7 @@ def apply_combat_command(
             cam_x, cam_y = float(pl["cam_x"]), float(pl["cam_y"])
             mx, my = float(pl["mx"]), float(pl["my"])
             wpx, wpy = dg.screen_to_world_waypoint(mx, my, cam_x, cam_y)
-            mark = dg.pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+            mark = _pick_hostile(mx, my, cam_x, cam_y)
             if mark is None and mission.kind == "strike" and mission.objective and not mission.objective.dead:
                 if dg.pick_strike_objective_at(mission.objective, mx, my, cam_x, cam_y):
                     mark = mission.objective
@@ -150,7 +161,7 @@ def apply_combat_command(
             cam_x, cam_y = float(pl["cam_x"]), float(pl["cam_y"])
             mx, my = float(pl["mx"]), float(pl["my"])
             wpx, wpy = dg.screen_to_world_waypoint(mx, my, cam_x, cam_y)
-            mark = dg.pick_hostile_at(groups, crafts, mx, my, cam_x, cam_y)
+            mark = _pick_hostile(mx, my, cam_x, cam_y)
             if mark is None and mission.kind == "strike" and mission.objective and not mission.objective.dead:
                 if dg.pick_strike_objective_at(mission.objective, mx, my, cam_x, cam_y):
                     mark = mission.objective
@@ -178,6 +189,16 @@ def apply_combat_command(
                 for lab in glab:
                     g = gm.get(lab)
                     if g and g.side == "player" and g.class_name == "Carrier":
+                        if not sender or getattr(g, "owner_id", "") == sender:
+                            dg.clear_carrier_air_orders(g)
+            elif sender:
+                for g in groups:
+                    if (
+                        g.side == "player"
+                        and g.selected
+                        and g.class_name == "Carrier"
+                        and getattr(g, "owner_id", "") == sender
+                    ):
                         dg.clear_carrier_air_orders(g)
             else:
                 for g in groups:
@@ -194,6 +215,13 @@ def apply_combat_command(
         elif kind == "control_assign":
             slot = int(pl["slot"])
             labels = [str(x) for x in (pl.get("labels") or [])]
+            if sender:
+                gm = {g.label: g for g in groups}
+                labels = [
+                    lab
+                    for lab in labels
+                    if lab in gm and getattr(gm[lab], "owner_id", "") == sender
+                ]
             if 0 <= slot < len(control_groups):
                 control_groups[slot] = labels
         elif kind == "select_slot":
@@ -204,7 +232,11 @@ def apply_combat_command(
                 picked = [
                     g
                     for g in groups
-                    if g.side == "player" and not g.dead and g.render_capital and g.label in labels
+                    if g.side == "player"
+                    and not g.dead
+                    and g.render_capital
+                    and g.label in labels
+                    and (not sender or getattr(g, "owner_id", "") == sender)
                 ]
                 if picked:
                     if shift:
@@ -215,7 +247,62 @@ def apply_combat_command(
         elif kind == "select_strike_wing":
             sq = int(pl["squadron_index"])
             shift = bool(pl.get("shift"))
-            dg.select_strike_wing_for_carriers(crafts, groups, sq, shift)
+            dg.select_strike_wing_for_carriers(
+                crafts, groups, sq, shift, sender if sender else None
+            )
+        elif kind == "pvp_set_territory_owner":
+            if bool(getattr(mission, "mp_pvp", False)):
+                node_id = str(pl.get("node_id") or "").strip()
+                owner = str(pl.get("owner_id") or "").strip()
+                if node_id:
+                    terr = getattr(mission, "pvp_territory", {}) or {}
+                    if owner:
+                        terr[node_id] = owner
+                    elif node_id in terr:
+                        terr.pop(node_id, None)
+                    mission.pvp_territory = terr
+        elif kind == "pvp_add_scrap":
+            if bool(getattr(mission, "mp_pvp", False)):
+                owner = str(pl.get("owner_id") or sender or "").strip()
+                amt = int(pl.get("amount", 0))
+                if owner and amt:
+                    scrap = getattr(mission, "pvp_scrap", {}) or {}
+                    scrap[owner] = int(scrap.get(owner, 0)) + int(amt)
+                    mission.pvp_scrap = scrap
+        elif kind == "purchase_deploy":
+            if bool(getattr(mission, "mp_pvp", False)) and sender:
+                rows = pl.get("design_rows") if isinstance(pl.get("design_rows"), list) else None
+                if rows:
+                    cost = max(0, int(pl.get("cost", 0)))
+                    scrap = getattr(mission, "pvp_scrap", {}) or {}
+                    have = int(scrap.get(sender, 0))
+                    if have >= cost:
+                        sx = float(pl.get("spawn_x", 0.0))
+                        sy = float(pl.get("spawn_y", 0.0))
+                        color_id = 0
+                        for g in groups:
+                            if g.side == "player" and getattr(g, "owner_id", "") == sender:
+                                color_id = int(getattr(g, "color_id", 0))
+                                break
+                        ng, nc = dg.build_player_fleet_from_design(
+                            data,
+                            owner_id=sender,
+                            color_id=color_id,
+                            design_rows=rows,
+                            label_prefix=f"{sender}:BG-{now_ms}:",
+                            spawn_anchor=(sx, sy),
+                        )
+                        groups.extend(ng)
+                        crafts.extend(nc)
+                        scrap[sender] = have - cost
+                        mission.pvp_scrap = scrap
+                        bag = getattr(mission, "pvp_battlegroups", {}) or {}
+                        hist = bag.get(sender)
+                        if not isinstance(hist, list):
+                            hist = []
+                        hist.append({"cost": cost, "spawn_x": sx, "spawn_y": sy, "rows": list(rows)})
+                        bag[sender] = hist[-12:]
+                        mission.pvp_battlegroups = bag
         elif kind == "clear_craft_selection":
             dg.clear_craft_selection(crafts)
     finally:

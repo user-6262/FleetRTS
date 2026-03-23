@@ -161,7 +161,7 @@ def step_combat_frame(
 
     ce.tick_player_engagement_timers(groups, crafts, dt)
 
-    co.prune_attack_targets(groups)
+    co.prune_attack_targets(groups, mission)
 
     ce.update_fog_of_war(fog, groups, crafts, active_pings)
     for p in active_pings:
@@ -179,7 +179,9 @@ def step_combat_frame(
         if g.dead:
             continue
         co.update_pd_overheat_streak(g, dt, data, missiles, pd_rof_mult[0])
-        w_auth = g.side != "player" or co.player_capital_may_fire_weapons(g, control_groups, cg_weapons_free)
+        w_auth = g.side != "player" or co.player_capital_may_fire_weapons(
+            g, control_groups, cg_weapons_free, mp_pvp=bool(getattr(mission, "mp_pvp", False))
+        )
         co.try_fire_weapons(
             data,
             g.x,
@@ -205,12 +207,16 @@ def step_combat_frame(
             prefer_attack_target=g.attack_target,
             obstacles=obs,
             fog=fog,
+            launcher_owner=getattr(g, "owner_id", None),
+            mp_pvp=bool(getattr(mission, "mp_pvp", False)),
         )
     for c in crafts:
         if c.dead:
             continue
         co.update_pd_overheat_streak(c, dt, data, missiles, pd_rof_mult[0])
-        w_auth = c.side != "player" or co.player_craft_may_fire_weapons(c, control_groups, cg_weapons_free)
+        w_auth = c.side != "player" or co.player_craft_may_fire_weapons(
+            c, control_groups, cg_weapons_free, mp_pvp=bool(getattr(mission, "mp_pvp", False))
+        )
         co.try_fire_weapons(
             data,
             c.x,
@@ -236,6 +242,8 @@ def step_combat_frame(
             prefer_attack_target=c.parent.attack_target,
             obstacles=obs,
             fog=fog,
+            launcher_owner=getattr(c, "owner_id", None),
+            mp_pvp=bool(getattr(mission, "mp_pvp", False)),
         )
 
     co.update_vfx_sparks(vfx_sparks, dt)
@@ -289,10 +297,32 @@ def step_combat_frame(
     supplies[0] = max(0.0, supplies[0])
 
     alive_player_cap = [g for g in groups if g.side == "player" and not g.dead]
+    if flow is None and bool(getattr(mission, "mp_pvp", False)):
+        owners_alive = sorted(
+            {
+                str(getattr(g, "owner_id", "")).strip()
+                for g in alive_player_cap
+                if getattr(g, "render_capital", False) and str(getattr(g, "owner_id", "")).strip()
+            }
+        )
+        if len(owners_alive) <= 1:
+            if owners_alive:
+                out_str = f"pvp victory — {owners_alive[0]} controls the field"
+            else:
+                out_str = "pvp draw — all fleets destroyed"
+            flow = CombatFlowDelta(
+                outcome=out_str,
+                phase="debrief",
+                store_selected=None,
+                store_hover=None,
+                run_total_score_add=0,
+                salvage_gain=0,
+                last_salvage_gain=0,
+            )
     ex_zone = ce.extract_rect_world()
-    if not alive_player_cap:
+    if flow is None and not alive_player_cap:
         flow = CombatFlowDelta(outcome="campaign over — fleet lost", phase="gameover")
-    elif (
+    elif flow is None and (
         alive_player_cap
         and ce.mission_allows_extract(mission)
         and all(ex_zone.collidepoint(g.x, g.y) for g in alive_player_cap)
@@ -300,7 +330,7 @@ def step_combat_frame(
         total = sum(g.hp / g.max_hp for g in alive_player_cap) / len(alive_player_cap)
         round_score = int(supplies[0] * 12 + total * 520 + mission.enemy_label_serial * 18)
         salvage_gain = ce.compute_mission_salvage_reward(mission, supplies[0], total)
-        tag = "STRIKE" if mission.kind == "strike" else "SALVAGE"
+        tag = "STRIKE" if mission.kind == "strike" else ("PVP" if mission.kind == "pvp" else "SALVAGE")
         out_str = f"round {round_idx} ({tag}) cleared  +{salvage_gain} salvage  (score +{round_score})"
         flow = CombatFlowDelta(
             outcome=out_str,
