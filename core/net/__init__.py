@@ -18,6 +18,7 @@ from .http_client import (
     get_lobby,
     get_lobby_by_short_id,
     join_lobby,
+    leave_lobby,
     list_lobbies,
     quick_join,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "get_lobby",
     "get_lobby_by_short_id",
     "join_lobby",
+    "leave_lobby",
     "list_lobbies",
     "quick_join",
     "host_config",

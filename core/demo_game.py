@@ -141,13 +141,14 @@ except ImportError:
 NET_MP = False
 FleetHttpError = RuntimeError
 RelayClient: Any = None
-create_lobby = get_lobby = get_lobby_by_short_id = join_lobby = list_lobbies = quick_join = None
+create_lobby = get_lobby = get_lobby_by_short_id = join_lobby = leave_lobby = list_lobbies = quick_join = None
 try:
     from net.http_client import FleetHttpError as _FleetHttpError
     from net.http_client import create_lobby as _create_lobby
     from net.http_client import get_lobby as _get_lobby
     from net.http_client import get_lobby_by_short_id as _get_lobby_by_short_id
     from net.http_client import join_lobby as _join_lobby
+    from net.http_client import leave_lobby as _leave_lobby
     from net.http_client import list_lobbies as _list_lobbies
     from net.http_client import quick_join as _quick_join
     from net.app_messages import host_config as _host_config
@@ -162,6 +163,7 @@ try:
     get_lobby = _get_lobby
     get_lobby_by_short_id = _get_lobby_by_short_id
     join_lobby = _join_lobby
+    leave_lobby = _leave_lobby
     list_lobbies = _list_lobbies
     quick_join = _quick_join
     RelayClient = _RelayClient
@@ -3934,6 +3936,14 @@ def run() -> None:
     def disconnect_mp_session() -> None:
         nonlocal mp_relay, remote_lobby_id, remote_lobby_short, mp_chat_input, mp_chat_focus
         nonlocal mp_match_generation, mp_applied_remote_start_gen, mp_lobby_authoritative
+        _leave_lid = remote_lobby_id
+        _leave_name = mp_player_name
+        _leave_base = fleet_http_base
+        if NET_MP and leave_lobby is not None and _leave_base and _leave_lid and (_leave_name or "").strip():
+            try:
+                leave_lobby(_leave_base, str(_leave_lid), _leave_name)
+            except Exception:
+                pass
         if mp_relay is not None:
             mp_relay.close()
             mp_relay = None
@@ -3985,7 +3995,13 @@ def run() -> None:
             and not mp_relay.error
             and mp_lobby_host
         ):
-            mp_relay.send_payload(host_config(mp_mode_coop, mp_use_asteroids, mp_enemy_pressure))
+            mp_relay.send_payload(
+                host_config(
+                    coop=mp_mode_coop,
+                    use_asteroids=mp_use_asteroids,
+                    enemy_pressure=mp_enemy_pressure,
+                )
+            )
 
     def on_player_hull_hit(tgt: Any) -> None:
         notify_player_unit_damaged_for_engagement(tgt, control_groups, cg_weapons_free)

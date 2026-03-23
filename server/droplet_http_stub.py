@@ -26,6 +26,7 @@ Health check:
 API highlights:
   GET  /api/v1/lobbies           — list sanitized lobbies (browser)
   POST /api/v1/lobbies/quick-join — join first open lobby or create public_queue waiting lobby
+  POST /api/v1/lobbies/{id}/leave — body {"name":"display_name"} removes player; deletes lobby if empty
   Lobby fields: match_type (custom|public_queue), authoritative (player|dedicated), status (open|in_game)
 """
 from __future__ import annotations
@@ -41,7 +42,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-STUB_VERSION = "4-list-quickjoin-schema"
+STUB_VERSION = "5-leave-lobby-cleanup"
 API_PREFIX = "/api/v1"
 
 _lobbies: Dict[str, Dict[str, Any]] = {}
@@ -416,7 +417,8 @@ class DropletStubHandler(BaseHTTPRequestHandler):
             return
 
         if path == f"{API_PREFIX}/lobbies" or path == f"{API_PREFIX}/lobbies/quick-join" or (
-            path.startswith(f"{API_PREFIX}/lobbies/") and path.endswith("/join")
+            path.startswith(f"{API_PREFIX}/lobbies/")
+            and (path.endswith("/join") or path.endswith("/leave"))
         ):
             if not _api_key_ok(self):
                 _json_response(self, 401, {"error": "unauthorized", "hint": "X-FleetRTS-API-Key header"})
@@ -506,6 +508,47 @@ class DropletStubHandler(BaseHTTPRequestHandler):
                 _json_response(self, err[0], err[1])
                 return
             _json_response(self, 200, {"lobby": lobby, "joined_as": joined_as or player_name})
+            return
+
+        if path.startswith(f"{API_PREFIX}/lobbies/") and path.endswith("/leave"):
+            prefix = f"{API_PREFIX}/lobbies/"
+            mid = path[len(prefix) : -len("/leave")]
+            lobby_id = mid.strip("/").split("/")[0]
+            leave_name = ""
+            if isinstance(body, dict) and body.get("name"):
+                leave_name = str(body["name"])[:64]
+            if not leave_name.strip():
+                _json_response(self, 400, {"error": "name_required", "hint": 'JSON body {"name":"display_name"}'})
+                return
+            leave_name = leave_name.strip()
+            with _lock:
+                lobby_l, st = _get_lobby_resolve_locked(lobby_id)
+                if st == "expired":
+                    _json_response(self, 410, {"error": "lobby_expired", "lobby_id": lobby_id})
+                    return
+                if not lobby_l:
+                    _json_response(self, 404, {"error": "lobby_not_found"})
+                    return
+                pl = list(lobby_l.get("players") or [])
+                removed = False
+                if leave_name in pl:
+                    i = pl.index(leave_name)
+                    pl = pl[:i] + pl[i + 1 :]
+                    lobby_l["players"] = pl
+                    removed = True
+                    lobby_l["updated_at"] = _now_ts()
+                if not pl:
+                    _delete_lobby_locked(lobby_id)
+                if STORE_PATH:
+                    _save_store_locked()
+            if not pl:
+                _json_response(self, 200, {"ok": True, "left": removed, "lobby": None, "lobby_deleted": True})
+            else:
+                _json_response(
+                    self,
+                    200,
+                    {"ok": True, "left": removed, "lobby": lobby_l, "lobby_deleted": False},
+                )
             return
 
         _json_response(self, 404, {"error": "not_found"})

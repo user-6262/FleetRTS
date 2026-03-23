@@ -19,11 +19,11 @@ def _post_headers() -> Dict[str, str]:
     return h
 
 
-def _post_json(url: str, body: Optional[dict]) -> Any:
+def _post_json(url: str, body: Optional[dict], *, timeout: float = 12) -> Any:
     data = json.dumps(body or {}).encode("utf-8")
     req = Request(url, data=data, method="POST", headers=_post_headers())
     try:
-        with urlopen(req, timeout=12) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw) if raw else None
     except HTTPError as e:
@@ -89,6 +89,18 @@ def join_lobby(base_url: str, lobby_id: str, player_name: str) -> Tuple[Dict[str
         raise FleetHttpError("unexpected response from join lobby")
     joined_as = str(out.get("joined_as") or player_name)[:64]
     return out["lobby"], joined_as
+
+
+def leave_lobby(base_url: str, lobby_id: str, display_name: str, *, timeout: float = 5) -> None:
+    """Remove display_name from the lobby HTTP player list (best-effort; same string as join returned as joined_as)."""
+    base = base_url.rstrip("/")
+    lid = lobby_id.strip()
+    name = (display_name or "").strip()[:64]
+    if not lid or not name:
+        return
+    out = _post_json(f"{base}/api/v1/lobbies/{lid}/leave", {"name": name}, timeout=timeout)
+    if not isinstance(out, dict) or out.get("ok") is not True:
+        raise FleetHttpError("unexpected response from leave lobby")
 
 
 def get_lobby(base_url: str, lobby_id: str) -> Dict[str, Any]:
