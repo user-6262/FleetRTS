@@ -201,6 +201,19 @@ except ImportError:
     from core.bundle_paths import game_data_json
 
 DATA_PATH = game_data_json()
+
+# Public lobby HTTP API (DigitalOcean stub, port 8765). Friends can run the game with no env vars.
+# Override: FLEETRTS_HTTP=http://127.0.0.1:8765  ·  Disable online: FLEETRTS_HTTP=
+DEFAULT_FLEETRTS_LOBBY_HTTP = "http://159.203.19.226:8765"
+
+
+def _resolve_fleet_http_base() -> Optional[str]:
+    env_raw = os.environ.get("FLEETRTS_HTTP")
+    if env_raw is not None:
+        return env_raw.strip() or None
+    return DEFAULT_FLEETRTS_LOBBY_HTTP.strip() or None
+
+
 WIDTH, HEIGHT = 1720, 990
 # Bottom RTS chrome (control groups, status, click-order panel). World draws above this strip.
 BOTTOM_BAR_H = 128
@@ -3422,7 +3435,7 @@ def draw_mp_hub(
     title = font_big.render("Multiplayer", True, (230, 238, 250))
     surf.blit(title, (lay.panel.centerx - title.get_width() // 2, lay.panel.y + 18))
     sub = font_tiny.render(
-        "HTTP lobby list + quick join · TCP relay · set FLEETRTS_HTTP to your droplet stub URL",
+        "HTTP lobby list + quick join · TCP relay · default URL or override with FLEETRTS_HTTP",
         True,
         (155, 175, 200),
     )
@@ -3494,7 +3507,7 @@ def draw_mp_hub(
     auth_hint = (
         f"Next online Create lobby: {auth_l}  ·  F4 or click strip to toggle"
         if srv
-        else "Set FLEETRTS_HTTP to enable online Create — authority applies to Create online lobby only"
+        else "Online URL disabled (empty FLEETRTS_HTTP) — clear env or edit DEFAULT_FLEETRTS_LOBBY_HTTP"
     )
     surf.blit(font_tiny.render(auth_hint[:110], True, (160, 188, 215) if srv else (120, 130, 145)), (ar.x + 6, ar.y + 4))
 
@@ -3503,7 +3516,7 @@ def draw_mp_hub(
         surf.blit(font_tiny.render(f"HTTP: {http_base[:72]}", True, (130, 165, 195)), (ax, ay))
     else:
         surf.blit(
-            font_tiny.render("FLEETRTS_HTTP not set — online lobby buttons disabled", True, (160, 120, 120)),
+            font_tiny.render("Online lobby URL disabled — no default and empty FLEETRTS_HTTP", True, (160, 120, 120)),
             (ax, ay),
         )
     if net_err:
@@ -3742,7 +3755,7 @@ def run() -> None:
     mp_ready = False
     mp_toast_until_ms = 0
     mp_toast_text = ""
-    fleet_http_base: Optional[str] = os.environ.get("FLEETRTS_HTTP", "").strip() or None
+    fleet_http_base: Optional[str] = _resolve_fleet_http_base()
     _mp_default_name = (os.environ.get("FLEETRTS_PLAYER", "Player").strip() or "Player")[:48]
     mp_player_name: str = _mp_default_name
     mp_name_buffer: str = _mp_default_name

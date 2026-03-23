@@ -27,20 +27,23 @@ What to send your friend
   and run FleetRTS.exe. Windows may show SmartScreen for an unsigned app — "More
   info" → "Run anyway" is normal for hobby builds.
 
-Multiplayer (optional)
-----------------------
-  They still need your droplet address. Set a Windows user environment variable:
+Multiplayer
+-----------
+  The game defaults to the public lobby URL in core/demo_game.py
+  (DEFAULT_FLEETRTS_LOBBY_HTTP). Rebuild the exe after you change that constant
+  when your droplet IP changes.
 
-    FLEETRTS_HTTP = http://YOUR_DROPLET:8765
+  Optional override for testers: Windows user environment variable
 
-  (Search "environment variables" → Environment Variables → New under User.)
+    FLEETRTS_HTTP = http://OTHER_HOST:8765
 
-  Or you can give them a small .cmd launcher:
+  Local stub only: set FLEETRTS_HTTP to empty to disable the default and use
+  offline-style MP hub (advanced).
 
-    set FLEETRTS_HTTP=http://YOUR_DROPLET:8765
+  Optional .cmd next to FleetRTS.exe:
+
+    set FLEETRTS_HTTP=http://OTHER:8765
     start "" "%~dp0FleetRTS.exe"
-
-  Save next to FleetRTS.exe.
 
 Troubleshooting
 ---------------
