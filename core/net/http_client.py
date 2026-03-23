@@ -36,12 +36,17 @@ def _post_json(url: str, body: Optional[dict]) -> Any:
         raise FleetHttpError(str(e.reason or e)) from e
 
 
-def _get_json(url: str) -> Any:
+def _get_json(url: str, *, timeout: float = 12) -> Any:
     req = Request(url, method="GET")
     try:
-        with urlopen(req, timeout=12) as resp:
+        with urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
-            return json.loads(raw) if raw else None
+            if not raw.strip():
+                return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise FleetHttpError(f"invalid JSON from server: {e}") from e
     except HTTPError as e:
         try:
             detail = e.read().decode("utf-8")
@@ -106,7 +111,8 @@ def get_lobby_by_short_id(base_url: str, short_id: str) -> Dict[str, Any]:
 
 def list_lobbies(base_url: str) -> List[Dict[str, Any]]:
     base = base_url.rstrip("/")
-    out = _get_json(f"{base}/api/v1/lobbies")
+    # Short timeout: this runs on the pygame main thread during MP hub refresh.
+    out = _get_json(f"{base}/api/v1/lobbies", timeout=4)
     if not isinstance(out, dict) or "lobbies" not in out:
         raise FleetHttpError("unexpected response from list lobbies")
     rows = out["lobbies"]

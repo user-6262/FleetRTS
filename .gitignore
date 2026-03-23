@@ -1,5 +1,6 @@
 build/
 dist/
+dist_build/
 *.spec.bak
 __pycache__/
 *.py[cod]

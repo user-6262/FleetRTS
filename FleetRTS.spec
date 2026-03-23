@@ -20,6 +20,21 @@ def _repo_root() -> pathlib.Path:
 
 ROOT = _repo_root()
 
+# demo_game loads net.* inside try/except; PyInstaller often misses those → NET_MP False → grey online buttons.
+_NET_HIDDEN = [
+    "net",
+    "net.http_client",
+    "net.relay_client",
+    "net.app_messages",
+    "net.protocol",
+    "net.combat_net",
+    "urllib.request",
+    "urllib.error",
+    "urllib.response",
+    "http.client",
+    "ssl",
+]
+
 a = Analysis(
     [str(ROOT / "core" / "main.py")],
     pathex=[str(ROOT), str(ROOT / "core")],
@@ -28,7 +43,7 @@ a = Analysis(
         (str(ROOT / "core" / "data.json"), "core"),
         (str(ROOT / "assets" / "sound"), "assets/sound"),
     ],
-    hiddenimports=[],
+    hiddenimports=_NET_HIDDEN,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -21,6 +21,31 @@ Do this, then that (new droplet first time)
   8) From your Windows PC: curl.exe -s http://198.199.80.13:8765/health  (same idea; if it fails, check UFW/DO cloud firewall).
   9) Run FleetRTS.exe (or set FLEETRTS_HTTP=http://198.199.80.13:8765 if you override).
 
+Automate first-time droplet setup (after git clone)
+---------------------------------------------------
+  From ~/FleetRTS as root (or sudo), one script does: apt packages, UFW (SSH + 8765 + 8766),
+  fleetrts.env from example with your public IP (DigitalOcean metadata if available, else prompt),
+  chmod start/stop, and starts the servers.
+
+    cd ~/FleetRTS
+    sudo bash server/bootstrap_droplet.sh
+
+  Options:
+    sudo bash server/bootstrap_droplet.sh --no-ufw      # you manage firewall only in DO panel
+    sudo bash server/bootstrap_droplet.sh --no-start     # setup only; start manually later
+    sudo bash server/bootstrap_droplet.sh --force-env    # rewrite server/fleetrts.env
+
+  Or set the IP before running (skips metadata/prompt):
+    sudo FLEETRTS_RELAY_HOST=198.199.80.13 bash server/bootstrap_droplet.sh
+
+After reboot, processes do not auto-start unless you add something else:
+  • Easiest: SSH in and run ./server/start_fleetrts.sh again.
+  • systemd: see server/README_DEPLOY.txt and fleetrts-*.service (paths assume /opt/fleetrts-server).
+  • crontab @reboot: advanced; point at your real ~/FleetRTS path.
+
+DigitalOcean “User data” (optional): paste a small cloud-init script at droplet create that clones
+  the repo and runs bootstrap — only worth it if you recreate droplets often.
+
 Paths assume the repo lives at ~/FleetRTS (git clone on the droplet).
 
 Start the lobby HTTP stub + TCP relay (no alias)
