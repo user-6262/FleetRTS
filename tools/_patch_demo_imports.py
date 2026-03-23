@@ -343,9 +343,11 @@ old7 = """def focus_camera_for_selection(cam_x: float, cam_y: float, targets: Li
     return clamp_camera(cx - VIEW_W * 0.5, cy - VIEW_H * 0.5)
 
 
-def separate_player_capitals(groups: List[Group], dt: float) -> None:
+def separate_player_capitals(groups: List[Group], dt: float, mp_pvp: bool = False) -> None:
     caps = [g for g in groups if g.side == "player" and not g.dead and g.render_capital]
     for a, b in combinations(caps, 2):
+        if mp_pvp and getattr(a, "owner_id", None) != getattr(b, "owner_id", None):
+            continue
         dx = b.x - a.x
         dy = b.y - a.y
         d = math.hypot(dx, dy)

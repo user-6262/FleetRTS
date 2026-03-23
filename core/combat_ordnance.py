@@ -727,6 +727,7 @@ def try_fire_weapons(
     fog: Optional[Any] = None,
     launcher_owner: Optional[str] = None,
     mp_pvp: bool = False,
+    launcher: Optional[Any] = None,
 ) -> None:
     dg = _dg()
 
@@ -916,7 +917,7 @@ def try_fire_weapons(
             ang = math.atan2(tgt.y - y, tgt.x - x)
             ux, uy = math.cos(ang), math.sin(ang)
             if side == "player":
-                cid = int(getattr(launcher, "color_id", 0))
+                cid = int(getattr(launcher, "color_id", 0)) if launcher is not None else 0
                 base = dg.MP_PLAYER_PALETTE[cid % len(dg.MP_PLAYER_PALETTE)]
                 col = tuple(min(255, int(ch * 1.15)) for ch in base)
             else:

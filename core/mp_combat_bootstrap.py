@@ -11,6 +11,11 @@ from typing import Any, List, Optional
 
 import demo_game as dg
 
+try:
+    from mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+except ImportError:
+    from core.mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+
 
 def bootstrap_mp_combat_match(
     *,
@@ -32,10 +37,14 @@ def bootstrap_mp_combat_match(
         colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
         designs = player_setup.get("designs") if isinstance(player_setup.get("designs"), dict) else {}
         ax0, ay0 = dg.deploy_anchor_xy()
+        n_pl = max(1, min(len(players), 8))
         for i, pname in enumerate(players[:8]):
             cid = int(max(0, min(int(colors.get(pname, 0)), 5)))
             rows = designs.get(pname) if isinstance(designs, dict) else None
-            anchor = (ax0 - 520 + (i % 4) * 320.0, ay0 - 180 + (i // 4) * 360.0)
+            if mp_pvp:
+                anchor = pvp_player_spawn_anchor(i, n_pl)
+            else:
+                anchor = coop_player_spawn_anchor(i, ax0, ay0)
             ng, nc = dg.build_player_fleet_from_design(
                 data,
                 owner_id=pname,

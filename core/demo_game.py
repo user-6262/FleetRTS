@@ -130,6 +130,11 @@ except ImportError:
     from core.combat_sim import CombatAudioEvents, CombatSimHooks, apply_combat_death_audio, step_combat_frame
 
 try:
+    from mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+except ImportError:
+    from core.mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+
+try:
     from combat_mp import apply_combat_command
     from combat_snapshot import SNAP_VERSION, apply_snapshot_state, hash_state_dict, snapshot_state
     from net.combat_net import COMBAT_CMD, COMBAT_SNAP, combat_cmd, combat_snap
@@ -4498,27 +4503,15 @@ def run() -> None:
             if mp_player_name not in players:
                 players.insert(0, mp_player_name)
             ax0, ay0 = deploy_anchor_xy()
-            pvp_total = max(1, min(len(players), 8))
-            pvp_left = max(1, (pvp_total + 1) // 2)
-
-            def pvp_spawn_anchor(i: int) -> Tuple[float, float]:
-                if i < pvp_left:
-                    li = i
-                    lx = WORLD_W * 0.20 + (li % 2) * 210.0
-                    ly = WORLD_H * 0.36 + (li // 2) * 210.0
-                    return lx, ly
-                ri = i - pvp_left
-                rx = WORLD_W * 0.80 - (ri % 2) * 210.0
-                ry = WORLD_H * 0.36 + (ri // 2) * 210.0
-                return rx, ry
+            n_pl = max(1, min(len(players), 8))
 
             for i, pname in enumerate(players[:8]):
                 cid = int(max(0, min(int(colors.get(pname, 0)), 5)))
                 rows = designs.get(pname) if isinstance(designs, dict) else None
                 if mp_mode_coop:
-                    anchor = (ax0 - 520 + (i % 4) * 320.0, ay0 - 180 + (i // 4) * 360.0)
+                    anchor = coop_player_spawn_anchor(i, ax0, ay0)
                 else:
-                    anchor = pvp_spawn_anchor(i)
+                    anchor = pvp_player_spawn_anchor(i, n_pl)
                 ng, nc = build_player_fleet_from_design(
                     data,
                     owner_id=pname,

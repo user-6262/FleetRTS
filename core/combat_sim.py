@@ -148,7 +148,7 @@ def step_combat_frame(
             continue
         ce.move_group(g, dt, player_caps_move)
 
-    ce.separate_player_capitals(groups, dt)
+    ce.separate_player_capitals(groups, dt, mp_pvp=bool(getattr(mission, "mp_pvp", False)))
 
     for g in groups:
         if g.side != "enemy" or g.dead:
@@ -209,6 +209,7 @@ def step_combat_frame(
             fog=fog,
             launcher_owner=getattr(g, "owner_id", None),
             mp_pvp=bool(getattr(mission, "mp_pvp", False)),
+            launcher=g,
         )
     for c in crafts:
         if c.dead:
@@ -244,6 +245,7 @@ def step_combat_frame(
             fog=fog,
             launcher_owner=getattr(c, "owner_id", None),
             mp_pvp=bool(getattr(mission, "mp_pvp", False)),
+            launcher=c,
         )
 
     co.update_vfx_sparks(vfx_sparks, dt)

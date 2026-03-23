@@ -344,9 +344,11 @@ def move_group(g: Any, dt: float, player_capitals: List[Any]) -> None:
             g.attack_move = False
 
 
-def separate_player_capitals(groups: List[Any], dt: float) -> None:
+def separate_player_capitals(groups: List[Any], dt: float, mp_pvp: bool = False) -> None:
     caps = [g for g in groups if g.side == "player" and not g.dead and g.render_capital]
     for a, b in combinations(caps, 2):
+        if mp_pvp and getattr(a, "owner_id", None) != getattr(b, "owner_id", None):
+            continue
         dx = b.x - a.x
         dy = b.y - a.y
         d = math.hypot(dx, dy)
