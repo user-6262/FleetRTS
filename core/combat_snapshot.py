@@ -14,7 +14,7 @@ try:
 except ImportError:
     from core.combat_constants import FOG_CH, FOG_CW
 
-SNAP_VERSION = 1
+SNAP_VERSION = 2
 
 
 def _roundf(x: Any, nd: int = 5) -> Any:
@@ -168,6 +168,8 @@ def snapshot_state(
         gl.append(
             {
                 "side": g.side,
+                "owner_id": getattr(g, "owner_id", "player"),
+                "color_id": int(getattr(g, "color_id", 0)),
                 "label": g.label,
                 "class_name": g.class_name,
                 "x": _roundf(g.x),
@@ -198,6 +200,8 @@ def snapshot_state(
         cl.append(
             {
                 "side": c.side,
+                "owner_id": getattr(c, "owner_id", getattr(c.parent, "owner_id", "player")),
+                "color_id": int(getattr(c, "color_id", getattr(c.parent, "color_id", 0))),
                 "label": c.label,
                 "parent_label": c.parent.label,
                 "class_name": c.class_name,
@@ -472,10 +476,21 @@ def apply_snapshot_state(
         seen_g.add(lab)
         g = label_group.get(lab)
         if g is None:
-            g = dg.make_group(data, gd["side"], lab, gd["class_name"], float(gd["x"]), float(gd["y"]))
+            g = dg.make_group(
+                data,
+                gd["side"],
+                lab,
+                gd["class_name"],
+                float(gd["x"]),
+                float(gd["y"]),
+                owner_id=str(gd.get("owner_id") or "player"),
+                color_id=int(gd.get("color_id", 0)),
+            )
             groups.append(g)
             label_group[lab] = g
         g.side = gd["side"]
+        g.owner_id = str(gd.get("owner_id") or getattr(g, "owner_id", "player"))
+        g.color_id = int(max(0, min(int(gd.get("color_id", getattr(g, "color_id", 0))), 5)))
         g.class_name = gd["class_name"]
         g.x, g.y, g.z = float(gd["x"]), float(gd["y"]), float(gd["z"])
         g.max_hp, g.hp = float(gd["max_hp"]), float(gd["hp"])
@@ -518,6 +533,8 @@ def apply_snapshot_state(
             mr = dg.class_max_weapon_range(data, csc)
             c = dg.Craft(
                 side=cd["side"],
+                owner_id=str(cd.get("owner_id") or getattr(parent, "owner_id", "player")),
+                color_id=int(cd.get("color_id", getattr(parent, "color_id", 0))),
                 label=lab,
                 class_name=cd["class_name"],
                 parent=parent,
@@ -536,6 +553,8 @@ def apply_snapshot_state(
             label_craft[lab] = c
         c.parent = parent
         c.side = cd["side"]
+        c.owner_id = str(cd.get("owner_id") or getattr(parent, "owner_id", "player"))
+        c.color_id = int(max(0, min(int(cd.get("color_id", getattr(parent, "color_id", 0))), 5)))
         c.class_name = cd["class_name"]
         c.slot_index = int(cd["slot_index"])
         c.squadron_index = int(cd["squadron_index"])

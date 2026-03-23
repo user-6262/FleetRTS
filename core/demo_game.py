@@ -142,6 +142,7 @@ NET_MP = False
 FleetHttpError = RuntimeError
 RelayClient: Any = None
 create_lobby = get_lobby = get_lobby_by_short_id = join_lobby = leave_lobby = list_lobbies = quick_join = None
+lobby_loadout = None
 try:
     from net.http_client import FleetHttpError as _FleetHttpError
     from net.http_client import create_lobby as _create_lobby
@@ -153,6 +154,7 @@ try:
     from net.http_client import quick_join as _quick_join
     from net.app_messages import host_config as _host_config
     from net.app_messages import lobby_chat as _lobby_chat
+    from net.app_messages import lobby_loadout as _lobby_loadout
     from net.app_messages import lobby_presence as _lobby_presence
     from net.app_messages import lobby_ready as _lobby_ready
     from net.app_messages import start_match as _start_match
@@ -168,6 +170,7 @@ try:
     quick_join = _quick_join
     RelayClient = _RelayClient
     lobby_chat = _lobby_chat
+    lobby_loadout = _lobby_loadout
     lobby_ready = _lobby_ready
     lobby_presence = _lobby_presence
     host_config = _host_config
@@ -184,9 +187,16 @@ except ImportError:
         return {"t": "host_config", "coop": coop, "use_asteroids": use_asteroids, "enemy_pressure": enemy_pressure}
 
     def start_match(  # type: ignore[misc]
-        *, generation: int, seed: int, round_idx: int, coop: bool, use_asteroids: bool, enemy_pressure: int
+        *,
+        generation: int,
+        seed: int,
+        round_idx: int,
+        coop: bool,
+        use_asteroids: bool,
+        enemy_pressure: int,
+        player_setup: Optional[dict] = None,
     ) -> dict:
-        return {
+        out = {
             "t": "start_match",
             "generation": generation,
             "seed": seed,
@@ -195,9 +205,15 @@ except ImportError:
             "use_asteroids": use_asteroids,
             "enemy_pressure": enemy_pressure,
         }
+        if isinstance(player_setup, dict):
+            out["player_setup"] = player_setup
+        return out
 
-    def lobby_presence(*, in_fleet_design: bool) -> dict:  # type: ignore[misc]
-        return {"t": "lobby_presence", "in_fleet_design": bool(in_fleet_design)}
+    def lobby_presence(*, in_fleet_design: bool, color_id: int = 0) -> dict:  # type: ignore[misc]
+        return {"t": "lobby_presence", "in_fleet_design": bool(in_fleet_design), "color_id": int(color_id)}
+
+    def lobby_loadout(*, payload: dict) -> dict:  # type: ignore[misc]
+        return {"t": "lobby_loadout", "payload": dict(payload or {})}
 
 try:
     from bundle_paths import game_data_json
@@ -209,6 +225,23 @@ DATA_PATH = game_data_json()
 # Public lobby HTTP API (DigitalOcean stub, port 8765). Friends can run the game with no env vars.
 # Override: FLEETRTS_HTTP=http://127.0.0.1:8765  ·  Disable online: FLEETRTS_HTTP=
 DEFAULT_FLEETRTS_LOBBY_HTTP = "http://198.199.80.13:8765"
+
+MP_PLAYER_PALETTE: List[Tuple[int, int, int]] = [
+    (90, 170, 255),   # blue
+    (120, 210, 150),  # green
+    (255, 170, 95),   # orange
+    (220, 130, 255),  # purple
+    (255, 225, 110),  # yellow
+    (255, 120, 120),  # red
+]
+MP_COOP_BLUE_PALETTE: List[Tuple[int, int, int]] = [
+    (90, 170, 255),
+    (110, 185, 255),
+    (130, 200, 255),
+    (80, 160, 230),
+    (105, 175, 235),
+    (125, 195, 245),
+]
 
 
 def _resolve_fleet_http_base() -> Optional[str]:
@@ -654,12 +687,14 @@ def select_strike_wing_for_carriers(
 
 
 def pick_player_craft_at(
-    crafts: List[Craft], mx: int, my: int, cam_x: float, cam_y: float
+    crafts: List[Craft], mx: int, my: int, cam_x: float, cam_y: float, owner_id: Optional[str] = None
 ) -> Optional[Craft]:
     best: Optional[Craft] = None
     best_d = 9999.0
     for c in crafts:
         if c.dead or c.side != "player" or c.parent.dead:
+            continue
+        if owner_id is not None and c.owner_id != owner_id:
             continue
         sx, sy, sc = world_to_screen(c.x, c.y, c.z, cam_x, cam_y)
         pr = 14.0 * max(0.75, sc)
@@ -1110,6 +1145,8 @@ def build_runtime_weapons(data: dict, sc: dict) -> List[RuntimeWeapon]:
 @dataclass
 class Group:
     side: str
+    owner_id: str
+    color_id: int
     label: str
     class_name: str
     x: float
@@ -1150,6 +1187,8 @@ class Group:
 @dataclass
 class Craft:
     side: str
+    owner_id: str
+    color_id: int
     label: str
     class_name: str
     parent: Group
@@ -1263,7 +1302,17 @@ class MissionState:
     obstacles: List[Asteroid] = field(default_factory=list)
 
 
-def make_group(data: dict, side: str, label: str, class_name: str, x: float, y: float) -> Group:
+def make_group(
+    data: dict,
+    side: str,
+    label: str,
+    class_name: str,
+    x: float,
+    y: float,
+    *,
+    owner_id: str = "player",
+    color_id: int = 0,
+) -> Group:
     sc = ship_class_by_name(data, class_name)
     max_hp = float(sc.get("hull_hp", sc["armor"] * 10 + sc["shields"]))
     spd = (16.0 + (float(sc["speed"]) / 100.0) * 76.0) * SPEED_SCALE
@@ -1273,6 +1322,8 @@ def make_group(data: dict, side: str, label: str, class_name: str, x: float, y: 
     z = rng.uniform(16.0, 58.0)
     return Group(
         side=side,
+        owner_id=str(owner_id or "player"),
+        color_id=int(max(0, min(int(color_id), 5))),
         label=label,
         class_name=class_name,
         x=x,
@@ -1302,6 +1353,8 @@ def spawn_hangar_crafts(data: dict, carrier: Group) -> List[Craft]:
             crafts.append(
                 Craft(
                     side=carrier.side,
+                    owner_id=carrier.owner_id,
+                    color_id=carrier.color_id,
                     label=f"{carrier.label}-{cname[:3]}{idx}",
                     class_name=cname,
                     parent=carrier,
@@ -1487,11 +1540,15 @@ def pick_strike_objective_at(
     return dist_xy(sx, sy, float(mx), float(my)) < pick_r
 
 
-def pick_player_capital_at(groups: List[Group], mx: int, my: int, cam_x: float, cam_y: float) -> Optional[Group]:
+def pick_player_capital_at(
+    groups: List[Group], mx: int, my: int, cam_x: float, cam_y: float, owner_id: Optional[str] = None
+) -> Optional[Group]:
     best: Optional[Group] = None
     best_d = 9999.0
     for g in groups:
         if g.side != "player" or g.dead or not g.render_capital:
+            continue
+        if owner_id is not None and g.owner_id != owner_id:
             continue
         sx, sy, sc = world_to_screen(g.x, g.y, g.z, cam_x, cam_y)
         pick_r = CAPITAL_PICK_R * max(0.85, sc)
@@ -1714,6 +1771,14 @@ def draw_craft_triangle(
     p3 = (xi + math.cos(heading - 2.35) * s * 0.55, yi + math.sin(heading - 2.35) * s * 0.55)
     pygame.draw.polygon(surf, color, [p1, p2, p3], width=0)
     pygame.draw.polygon(surf, color, [p1, p2, p3], width=1)
+
+
+def player_unit_color(color_id: int, *, coop_mode: bool, for_craft: bool) -> Tuple[int, int, int]:
+    pal = MP_COOP_BLUE_PALETTE if coop_mode else MP_PLAYER_PALETTE
+    base = pal[int(max(0, min(int(color_id), len(pal) - 1)))]
+    if for_craft:
+        return tuple(min(255, int(ch * 1.1)) for ch in base)
+    return base
 
 
 def draw_ballistic_slug(surf: pygame.Surface, s: BallisticSlug, cam_x: float, cam_y: float) -> None:
@@ -2106,14 +2171,73 @@ def selected_player_capital_sig(groups: List[Group]) -> Tuple[str, ...]:
     )
 
 
-def build_initial_player_fleet(data: dict) -> Tuple[List[Group], List[Craft]]:
+def build_initial_player_fleet(
+    data: dict,
+    *,
+    owner_id: str = "player",
+    color_id: int = 0,
+    label_prefix: str = "",
+) -> Tuple[List[Group], List[Craft]]:
     ax, ay = deploy_anchor_xy()
     groups: List[Group] = [
-        make_group(data, "player", "CV-1", "Carrier", ax - 200, ay),
-        make_group(data, "player", "DD-1", "Destroyer", ax + 30, ay + 28),
-        make_group(data, "player", "CG-1", "Cruiser", ax + 230, ay - 12),
-        make_group(data, "player", "FF-1", "Frigate", ax - 360, ay - 6),
+        make_group(data, "player", f"{label_prefix}CV-1", "Carrier", ax - 200, ay, owner_id=owner_id, color_id=color_id),
+        make_group(data, "player", f"{label_prefix}DD-1", "Destroyer", ax + 30, ay + 28, owner_id=owner_id, color_id=color_id),
+        make_group(data, "player", f"{label_prefix}CG-1", "Cruiser", ax + 230, ay - 12, owner_id=owner_id, color_id=color_id),
+        make_group(data, "player", f"{label_prefix}FF-1", "Frigate", ax - 360, ay - 6, owner_id=owner_id, color_id=color_id),
     ]
+    crafts: List[Craft] = []
+    for g in groups:
+        if ship_class_by_name(data, g.class_name).get("hangar"):
+            crafts.extend(spawn_hangar_crafts(data, g))
+    clear_selection(groups)
+    groups[0].selected = True
+    return groups, crafts
+
+
+def export_player_fleet_design(groups: List[Group]) -> List[Dict[str, str]]:
+    rows: List[Dict[str, str]] = []
+    for g in groups:
+        if g.side == "player" and g.render_capital and not g.dead:
+            rows.append({"class_name": g.class_name, "label": g.label})
+    return rows
+
+
+def build_player_fleet_from_design(
+    data: dict,
+    *,
+    owner_id: str,
+    color_id: int,
+    design_rows: Optional[List[Dict[str, str]]] = None,
+    label_prefix: str = "",
+    spawn_anchor: Optional[Tuple[float, float]] = None,
+) -> Tuple[List[Group], List[Craft]]:
+    if not design_rows:
+        return build_initial_player_fleet(data, owner_id=owner_id, color_id=color_id, label_prefix=label_prefix)
+    ax, ay = spawn_anchor if spawn_anchor is not None else deploy_anchor_xy()
+    groups: List[Group] = []
+    for i, row in enumerate(design_rows):
+        cls = str((row or {}).get("class_name") or "").strip()
+        try:
+            ship_class_by_name(data, cls)
+        except KeyError:
+            continue
+        px = ax - 320 + (i % 6) * 150.0
+        py = ay + (i // 6) * 56.0
+        lbl = str((row or {}).get("label") or f"{RECRUIT_LABEL_PREFIX.get(cls, 'UN')}-{i+1}")
+        groups.append(
+            make_group(
+                data,
+                "player",
+                f"{label_prefix}{lbl}",
+                cls,
+                px,
+                py,
+                owner_id=owner_id,
+                color_id=color_id,
+            )
+        )
+    if not groups:
+        return build_initial_player_fleet(data, owner_id=owner_id, color_id=color_id, label_prefix=label_prefix)
     crafts: List[Craft] = []
     for g in groups:
         if ship_class_by_name(data, g.class_name).get("hangar"):
@@ -3663,6 +3787,7 @@ def draw_mp_lobby(
     coop: bool,
     use_asteroids: bool,
     enemy_pressure_i: int,
+    player_color_id: int,
     host: bool,
     ready: bool,
     mp_round: int,
@@ -3688,15 +3813,15 @@ def draw_mp_lobby(
     )
     surf.blit(sub, (lay.panel.x + 20, lay.panel.y + 46))
 
-    mode_v = "Co-op vs AI" if coop else "PvP (not implemented)"
+    mode_v = "Objective co-op" if coop else "PvP"
     _draw_mp_lobby_setting_row(surf, font, font_tiny, lay.row_mode, "Mode", mode_v, host)
     _draw_mp_lobby_setting_row(
         surf,
         font,
         font_tiny,
         lay.row_mission,
-        "Mission rhythm",
-        "Alternating strike / recovery (same as campaign rounds)",
+        "Player color",
+        f"Slot {int(max(0, min(player_color_id, 5))) + 1}/6",
         host,
     )
     rock_v = "Asteroid field ON" if use_asteroids else "Asteroid field OFF"
@@ -3877,6 +4002,9 @@ def run() -> None:
     mp_match_generation = 0
     mp_applied_remote_start_gen = 0
     remote_loadouts: Dict[str, bool] = {}
+    mp_player_color_id = 0
+    remote_player_colors: Dict[str, int] = {}
+    mp_player_fleet_designs: Dict[str, List[Dict[str, str]]] = {}
     mp_net_err: Optional[str] = None
     mp_hub_svc_state: str = "offline"
     mp_hub_user_message: Optional[str] = None
@@ -3956,6 +4084,8 @@ def run() -> None:
         mp_chat_focus = False
         remote_ready.clear()
         remote_loadouts.clear()
+        remote_player_colors.clear()
+        mp_player_fleet_designs.clear()
         mp_match_generation = 0
         mp_applied_remote_start_gen = 0
         mp_lobby_authoritative = "player"
@@ -4032,7 +4162,7 @@ def run() -> None:
         loadout_roster_scroll = 0
         phase = "ship_loadouts"
         if from_multiplayer and remote_lobby_id and mp_relay is not None and not mp_relay.error:
-            mp_relay.send_payload(lobby_presence(in_fleet_design=True))
+            mp_relay.send_payload(lobby_presence(in_fleet_design=True, color_id=mp_player_color_id))
 
     def finish_mp_ship_loadouts_to_lobby() -> None:
         nonlocal phase, mp_loadouts_active
@@ -4046,9 +4176,13 @@ def run() -> None:
         mp_loadouts_active = False
         phase = "mp_lobby"
         if remote_lobby_id and mp_relay is not None and not mp_relay.error:
-            mp_relay.send_payload(lobby_presence(in_fleet_design=False))
+            mp_relay.send_payload(lobby_presence(in_fleet_design=False, color_id=mp_player_color_id))
+            if lobby_loadout is not None:
+                mp_relay.send_payload(
+                    lobby_loadout(payload={"fleet": export_player_fleet_design(mp_fleet_groups)})
+                )
 
-    def launch_mp_combat(match_seed: Optional[int] = None) -> None:
+    def launch_mp_combat(match_seed: Optional[int] = None, player_setup: Optional[Dict[str, Any]] = None) -> None:
         nonlocal groups, crafts, mission, cam_x, cam_y, phase, post_combat_phase, round_idx
         nonlocal fog, tts_prev_sel_sig
         nonlocal mp_combat_tick, mp_host_cmd_queue, mp_pending_snap, mp_client_last_snap_tick
@@ -4066,11 +4200,37 @@ def run() -> None:
         loadout_preview_crafts.clear()
         loadout_choice_map.clear()
         if not mp_fleet_groups:
-            ng, nc = build_initial_player_fleet(data)
+            ng, nc = build_initial_player_fleet(
+                data, owner_id=mp_player_name, color_id=mp_player_color_id, label_prefix=f"{mp_player_name}:"
+            )
             mp_fleet_groups.extend(ng)
             mp_fleet_crafts.extend(nc)
-        groups[:] = list(mp_fleet_groups)
-        crafts[:] = list(mp_fleet_crafts)
+        if isinstance(player_setup, dict) and isinstance(player_setup.get("players"), list):
+            groups.clear()
+            crafts.clear()
+            players = [str(p)[:48] for p in player_setup.get("players", []) if str(p).strip()]
+            colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
+            designs = player_setup.get("designs") if isinstance(player_setup.get("designs"), dict) else {}
+            if mp_player_name not in players:
+                players.insert(0, mp_player_name)
+            ax0, ay0 = deploy_anchor_xy()
+            for i, pname in enumerate(players[:8]):
+                cid = int(max(0, min(int(colors.get(pname, 0)), 5)))
+                rows = designs.get(pname) if isinstance(designs, dict) else None
+                anchor = (ax0 - 520 + (i % 4) * 320.0, ay0 - 180 + (i // 4) * 360.0)
+                ng, nc = build_player_fleet_from_design(
+                    data,
+                    owner_id=pname,
+                    color_id=cid,
+                    design_rows=rows if isinstance(rows, list) else None,
+                    label_prefix=f"{pname}:",
+                    spawn_anchor=anchor,
+                )
+                groups.extend(ng)
+                crafts.extend(nc)
+        else:
+            groups[:] = list(mp_fleet_groups)
+            crafts[:] = list(mp_fleet_crafts)
         clear_selection(groups)
         clear_craft_selection(crafts)
         roster = loadout_player_capitals_sorted(groups)
@@ -4163,7 +4323,11 @@ def run() -> None:
                 if mp_lobby_host:
                     send_host_config_if_online()
                 in_fd = phase == "ship_loadouts" and mp_loadouts_active
-                mp_relay.send_payload(lobby_presence(in_fleet_design=in_fd))
+                mp_relay.send_payload(lobby_presence(in_fleet_design=in_fd, color_id=mp_player_color_id))
+                if lobby_loadout is not None:
+                    mp_relay.send_payload(
+                        lobby_loadout(payload={"fleet": export_player_fleet_design(mp_fleet_groups)})
+                    )
             elif _m.get("t") == "peer_left":
                 remote_relay_players = list(_m.get("players") or [])
                 left_p = str(_m.get("player") or "")
@@ -4184,6 +4348,22 @@ def run() -> None:
                 elif isinstance(body, dict) and body.get("t") == "lobby_presence":
                     who = str(_m.get("from") or "?")
                     remote_loadouts[who] = bool(body.get("in_fleet_design", False))
+                    remote_player_colors[who] = int(max(0, min(int(body.get("color_id", 0)), 5)))
+                elif isinstance(body, dict) and body.get("t") == "lobby_loadout":
+                    who = str(_m.get("from") or "?")
+                    payload = body.get("payload") or {}
+                    fleet_rows = payload.get("fleet") if isinstance(payload, dict) else None
+                    if isinstance(fleet_rows, list):
+                        cleaned: List[Dict[str, str]] = []
+                        for row in fleet_rows[:24]:
+                            if isinstance(row, dict):
+                                cleaned.append(
+                                    {
+                                        "class_name": str(row.get("class_name") or "")[:48],
+                                        "label": str(row.get("label") or "")[:48],
+                                    }
+                                )
+                        mp_player_fleet_designs[who] = cleaned
                 elif isinstance(body, dict) and body.get("t") == "host_config":
                     if not mp_lobby_host:
                         mp_mode_coop = bool(body.get("coop", mp_mode_coop))
@@ -4198,7 +4378,9 @@ def run() -> None:
                         and phase == "combat"
                         and outcome is None
                     ):
-                        mp_host_cmd_queue.append(dict(body))
+                        q = dict(body)
+                        q["_sender"] = str(_m.get("from") or "")
+                        mp_host_cmd_queue.append(q)
                 elif isinstance(body, dict) and body.get("t") == COMBAT_SNAP:
                     _client_snap = (not mp_lobby_host) or (mp_lobby_authoritative == "dedicated")
                     if _client_snap and mp_sync_match_active() and phase in ("combat", "debrief"):
@@ -4207,22 +4389,18 @@ def run() -> None:
                     if phase == "mp_lobby":
                         gen = int(body.get("generation", 0))
                         if gen > mp_applied_remote_start_gen:
-                            if not body.get("coop", True):
-                                mp_toast_text = "Host started PvP (not implemented here)."
-                                mp_toast_until_ms = pygame.time.get_ticks() + 4000
-                                audio.play_negative()
-                            else:
-                                mp_applied_remote_start_gen = gen
-                                mp_round_idx = int(body.get("round_idx", mp_round_idx))
-                                mp_use_asteroids = bool(body.get("use_asteroids", mp_use_asteroids))
-                                mp_mode_coop = bool(body.get("coop", True))
-                                ep = int(body.get("enemy_pressure", mp_enemy_pressure))
-                                mp_enemy_pressure = max(0, min(ep, 3))
-                                ms = body.get("seed")
-                                mseed = int(ms) if ms is not None else None
-                                launch_mp_combat(mseed)
-                                mp_ready = False
-                                audio.play_positive()
+                            mp_applied_remote_start_gen = gen
+                            mp_round_idx = int(body.get("round_idx", mp_round_idx))
+                            mp_use_asteroids = bool(body.get("use_asteroids", mp_use_asteroids))
+                            mp_mode_coop = bool(body.get("coop", True))
+                            ep = int(body.get("enemy_pressure", mp_enemy_pressure))
+                            mp_enemy_pressure = max(0, min(ep, 3))
+                            ms = body.get("seed")
+                            mseed = int(ms) if ms is not None else None
+                            psetup = body.get("player_setup")
+                            launch_mp_combat(mseed, psetup if isinstance(psetup, dict) else None)
+                            mp_ready = False
+                            audio.play_positive()
 
     def mp_sync_match_active() -> bool:
         """True while an online lobby match is in progress (combat or debrief return path)."""
@@ -4258,17 +4436,17 @@ def run() -> None:
         return True
 
     def mp_sel_player_group_labels() -> List[str]:
-        return [g.label for g in groups if g.side == "player" and g.selected and not g.dead]
+        return [g.label for g in groups if g.owner_id == mp_player_name and g.selected and not g.dead]
 
     def mp_sel_capital_labels() -> List[str]:
         return [
             g.label
             for g in groups
-            if g.side == "player" and g.selected and not g.dead and g.render_capital
+            if g.owner_id == mp_player_name and g.selected and not g.dead and g.render_capital
         ]
 
     def mp_sel_craft_labels() -> List[str]:
-        return [c.label for c in crafts if c.side == "player" and c.selected and not c.dead]
+        return [c.label for c in crafts if c.owner_id == mp_player_name and c.selected and not c.dead]
 
     _hub_debug_log = os.environ.get("FLEETRTS_DEBUG_LOG", "").strip()
     _hub_http_disabled = os.environ.get("FLEETRTS_HUB_DISABLE_HTTP", "").strip().lower() in ("1", "true", "yes")
@@ -4745,6 +4923,19 @@ def run() -> None:
                                     mp_match_generation += 1
                                     mgen = mp_match_generation
                                     mseed = random.randint(1, 2**31 - 1)
+                                    _players = [p for p in remote_relay_players if isinstance(p, str) and p.strip()]
+                                    if mp_player_name not in _players:
+                                        _players.insert(0, mp_player_name)
+                                    _colors: Dict[str, int] = {mp_player_name: int(mp_player_color_id)}
+                                    for _pn, _cid in remote_player_colors.items():
+                                        _colors[str(_pn)] = int(max(0, min(int(_cid), 5)))
+                                    _designs: Dict[str, List[Dict[str, str]]] = {
+                                        mp_player_name: export_player_fleet_design(mp_fleet_groups)
+                                    }
+                                    for _pn, _rows in mp_player_fleet_designs.items():
+                                        if isinstance(_rows, list):
+                                            _designs[str(_pn)] = _rows
+                                    _setup = {"players": _players, "colors": _colors, "designs": _designs}
                                     mp_relay.send_payload(
                                         start_match(
                                             generation=mgen,
@@ -4753,9 +4944,10 @@ def run() -> None:
                                             coop=mp_mode_coop,
                                             use_asteroids=mp_use_asteroids,
                                             enemy_pressure=mp_enemy_pressure,
+                                            player_setup=_setup,
                                         )
                                     )
-                                    launch_mp_combat(mseed)
+                                    launch_mp_combat(mseed, _setup)
                                     audio.play_positive()
                             else:
                                 launch_mp_combat()
@@ -4768,8 +4960,15 @@ def run() -> None:
                         send_host_config_if_online()
                         audio.play_positive()
                     elif layl.row_mission.collidepoint(mx, my):
-                        mp_toast_text = "Mission presets will map to begin_combat_round / data later."
-                        mp_toast_until_ms = pygame.time.get_ticks() + 2800
+                        mp_player_color_id = (mp_player_color_id + 1) % len(MP_PLAYER_PALETTE)
+                        if remote_lobby_id and mp_relay is not None and not mp_relay.error:
+                            mp_relay.send_payload(lobby_presence(in_fleet_design=False, color_id=mp_player_color_id))
+                            if lobby_loadout is not None:
+                                mp_relay.send_payload(
+                                    lobby_loadout(payload={"fleet": export_player_fleet_design(mp_fleet_groups)})
+                                )
+                        mp_toast_text = f"Player color set to slot {mp_player_color_id + 1}/6."
+                        mp_toast_until_ms = pygame.time.get_ticks() + 2200
                         audio.play_positive()
                     elif layl.row_rocks.collidepoint(mx, my):
                         mp_use_asteroids = not mp_use_asteroids
@@ -5950,7 +6149,9 @@ def run() -> None:
                                 mouse_done = True
 
                             if not mouse_done and drag <= DRAG_CLICK_MAX_PX:
-                                c_hit = pick_player_craft_at(crafts, mx, my, cam_x, cam_y)
+                                c_hit = pick_player_craft_at(
+                                    crafts, mx, my, cam_x, cam_y, mp_player_name if mp_sync_match_active() else None
+                                )
                                 if c_hit:
                                     if not shift_down:
                                         clear_selection(groups)
@@ -5967,7 +6168,9 @@ def run() -> None:
                                     last_cap_click_label = None
                                     mouse_done = True
                                 if not mouse_done:
-                                    hit = pick_player_capital_at(groups, mx, my, cam_x, cam_y)
+                                    hit = pick_player_capital_at(
+                                        groups, mx, my, cam_x, cam_y, mp_player_name if mp_sync_match_active() else None
+                                    )
                                     now = pygame.time.get_ticks()
                                     if hit:
                                         if (
@@ -6133,6 +6336,7 @@ def run() -> None:
                         cmd={
                             "kind": str(qcmd.get("kind", "")),
                             "payload": dict(qcmd.get("payload") or {}),
+                            "sender": str(qcmd.get("_sender") or ""),
                         },
                     )
                 mp_host_cmd_queue.clear()
@@ -6393,6 +6597,7 @@ def run() -> None:
                 coop=mp_mode_coop,
                 use_asteroids=mp_use_asteroids,
                 enemy_pressure_i=mp_enemy_pressure,
+                player_color_id=mp_player_color_id,
                 host=mp_lobby_host,
                 ready=mp_ready,
                 mp_round=mp_round_idx,
@@ -6542,7 +6747,11 @@ def run() -> None:
                 if phase == "combat" and g.side == "enemy" and not fog_cell_visible(fog, g.x, g.y):
                     continue
                 sx, sy, sc = world_to_screen(g.x, g.y, g.z, cam_x, cam_y)
-                col = (90, 170, 255) if g.side == "player" else (255, 85, 85)
+                col = (
+                    player_unit_color(g.color_id, coop_mode=mp_mode_coop, for_craft=False)
+                    if not str(g.side).startswith("enemy")
+                    else (255, 85, 85)
+                )
                 if g.selected:
                     col = (255, 240, 120)
                 h = heading_for_group(g)
@@ -6573,7 +6782,11 @@ def run() -> None:
                 if phase == "combat" and c.side == "enemy" and not fog_cell_visible(fog, c.x, c.y):
                     continue
                 sx, sy, sc = world_to_screen(c.x, c.y, c.z, cam_x, cam_y)
-                col = (130, 200, 255) if c.side == "player" else (255, 130, 130)
+                col = (
+                    player_unit_color(c.color_id, coop_mode=mp_mode_coop, for_craft=True)
+                    if not str(c.side).startswith("enemy")
+                    else (255, 130, 130)
+                )
                 draw_craft_triangle(screen, sx, sy, col, c.heading, size=6.5 * sc)
                 draw_strike_craft_tag(screen, font_micro, sx, sy, c.class_name, c.hp, c.max_hp)
                 if c.selected and c.side == "player":

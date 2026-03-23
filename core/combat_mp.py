@@ -59,14 +59,21 @@ def apply_combat_command(
     pl = cmd.get("payload") or {}
     glab = [str(x) for x in (pl.get("group_labels") or [])]
     clab = [str(x) for x in (pl.get("craft_labels") or [])]
+    sender = str(cmd.get("sender") or "").strip()
 
     def groups_pick() -> List[Any]:
         m = {g.label: g for g in groups}
-        return [m[l] for l in glab if l in m and not m[l].dead]
+        out = [m[l] for l in glab if l in m and not m[l].dead]
+        if sender:
+            out = [g for g in out if getattr(g, "owner_id", "") == sender]
+        return out
 
     def crafts_pick() -> List[Any]:
         m = {c.label: c for c in crafts}
-        return [m[l] for l in clab if l in m and not m[l].dead]
+        out = [m[l] for l in clab if l in m and not m[l].dead]
+        if sender:
+            out = [c for c in out if getattr(c, "owner_id", "") == sender]
+        return out
 
     sg, sc = _save_selection(groups, crafts)
     try:

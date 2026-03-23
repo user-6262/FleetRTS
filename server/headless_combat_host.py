@@ -90,9 +90,6 @@ def _relay_dispatch(
         cfg["enemy_pressure"] = max(0, min(ep, 3))
         return
     if kind == "start_match":
-        if not body.get("coop", True):
-            print("[FleetRTS sim] Ignoring PvP start_match (co-op only).", flush=True)
-            return
         gen = int(body.get("generation", 0))
         if gen <= applied_gen_holder[0]:
             return
@@ -101,10 +98,14 @@ def _relay_dispatch(
         cfg["match_seed"] = body.get("seed")
         cfg["use_asteroids"] = bool(body.get("use_asteroids", cfg["use_asteroids"]))
         cfg["enemy_pressure"] = max(0, min(int(body.get("enemy_pressure", cfg["enemy_pressure"])), 3))
+        psetup = body.get("player_setup")
+        cfg["player_setup"] = psetup if isinstance(psetup, dict) else None
         combat_holder[0] = "bootstrap"
         return
     if kind == COMBAT_CMD and combat_holder[0] == "running":
-        cmd_queue.append(dict(body))
+        q = dict(body)
+        q["_sender"] = str(msg.get("from") or "")
+        cmd_queue.append(q)
 
 
 def main() -> None:
@@ -143,6 +144,7 @@ def main() -> None:
         "enemy_pressure": 0,
         "round_idx": 1,
         "match_seed": None,
+        "player_setup": None,
     }
     applied_gen: List[int] = [0]
     combat_mode: List[Any] = [None]  # None | "bootstrap" | "running"
@@ -226,6 +228,7 @@ def main() -> None:
                 enemy_pressure=int(cfg["enemy_pressure"]),
                 groups=groups,
                 crafts=crafts,
+                player_setup=cfg.get("player_setup"),
             )
             control_groups[0] = dg.all_player_capital_labels(groups)
             combat_mode[0] = "running"
@@ -266,6 +269,7 @@ def main() -> None:
                     cmd={
                         "kind": str(qcmd.get("kind", "")),
                         "payload": dict(qcmd.get("payload") or {}),
+                        "sender": str(qcmd.get("_sender") or ""),
                     },
                 )
             cmd_queue.clear()

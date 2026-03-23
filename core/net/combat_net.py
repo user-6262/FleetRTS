@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 # Bump when snapshot schema changes (must match combat_snapshot.SNAP_VERSION).
-COMBAT_NET_VERSION = 1
+COMBAT_NET_VERSION = 2
 
 COMBAT_CMD = "combat_cmd"
 COMBAT_SNAP = "combat_snap"

@@ -21,13 +21,34 @@ def bootstrap_mp_combat_match(
     enemy_pressure: int,
     groups: List[Any],
     crafts: List[Any],
+    player_setup: Optional[dict] = None,
 ) -> Any:
     """Replace `groups` / `crafts` contents and return the new `mission`."""
     groups.clear()
     crafts.clear()
-    ng, nc = dg.build_initial_player_fleet(data)
-    groups.extend(ng)
-    crafts.extend(nc)
+    if isinstance(player_setup, dict) and isinstance(player_setup.get("players"), list):
+        players = [str(p)[:48] for p in player_setup.get("players", []) if str(p).strip()]
+        colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
+        designs = player_setup.get("designs") if isinstance(player_setup.get("designs"), dict) else {}
+        ax0, ay0 = dg.deploy_anchor_xy()
+        for i, pname in enumerate(players[:8]):
+            cid = int(max(0, min(int(colors.get(pname, 0)), 5)))
+            rows = designs.get(pname) if isinstance(designs, dict) else None
+            anchor = (ax0 - 520 + (i % 4) * 320.0, ay0 - 180 + (i // 4) * 360.0)
+            ng, nc = dg.build_player_fleet_from_design(
+                data,
+                owner_id=pname,
+                color_id=cid,
+                design_rows=rows if isinstance(rows, list) else None,
+                label_prefix=f"{pname}:",
+                spawn_anchor=anchor,
+            )
+            groups.extend(ng)
+            crafts.extend(nc)
+    else:
+        ng, nc = dg.build_initial_player_fleet(data)
+        groups.extend(ng)
+        crafts.extend(nc)
     dg.clear_selection(groups)
     dg.clear_craft_selection(crafts)
     roster = dg.loadout_player_capitals_sorted(groups)

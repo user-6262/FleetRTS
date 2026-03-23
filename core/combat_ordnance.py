@@ -748,7 +748,12 @@ def try_fire_weapons(
             launch_spd = min(raw_launch, launch_cap)
             ang = math.atan2(tgt.y - y, tgt.x - x)
             ux, uy = math.cos(ang), math.sin(ang)
-            col = (255, 200, 90) if side == "player" else (255, 120, 100)
+            if side == "player":
+                cid = int(getattr(launcher, "color_id", 0))
+                base = dg.MP_COOP_BLUE_PALETTE[cid % len(dg.MP_COOP_BLUE_PALETTE)]
+                col = tuple(min(255, int(ch * 1.15)) for ch in base)
+            else:
+                col = (255, 120, 100)
             mz = origin_z + random.uniform(-4, 4)
             intercept_hp = float(proj.get("pd_intercept_hp", MISSILE_PD_INTERCEPT_HP_DEFAULT))
             missiles.append(
