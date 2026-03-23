@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import random
 import sys
+import threading
 from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
@@ -204,7 +206,7 @@ DATA_PATH = game_data_json()
 
 # Public lobby HTTP API (DigitalOcean stub, port 8765). Friends can run the game with no env vars.
 # Override: FLEETRTS_HTTP=http://127.0.0.1:8765  ·  Disable online: FLEETRTS_HTTP=
-DEFAULT_FLEETRTS_LOBBY_HTTP = "http://159.203.19.226:8765"
+DEFAULT_FLEETRTS_LOBBY_HTTP = "http://198.199.80.13:8765"
 
 
 def _resolve_fleet_http_base() -> Optional[str]:
@@ -214,6 +216,33 @@ def _resolve_fleet_http_base() -> Optional[str]:
     return DEFAULT_FLEETRTS_LOBBY_HTTP.strip() or None
 
 
+def _friendly_hub_http_message(raw: str) -> str:
+    """Single-line player-facing summary; keep technical details for logs only."""
+    s = (raw or "").strip()
+    low = s.lower()
+    if "stalled" in low or "thread" in low:
+        return "The lobby list took too long. Try again in a moment."
+    if "timed out" in low or "timeout" in low:
+        return "The lobby server didn't respond in time."
+    if "refused" in low or "actively refused" in low:
+        return "No lobby server accepted the connection."
+    if "getaddrinfo" in low or "name or service not known" in low or "name resolution" in low:
+        return "Couldn't look up the lobby server address."
+    if "ssl" in low or "certificate" in low or "tls" in low:
+        return "A secure connection to the lobby server couldn't be established."
+    if s.startswith("HTTP 401") or " 401" in s[:24]:
+        return "The lobby server rejected the request (sign-in or key)."
+    if s.startswith("HTTP 403") or " 403" in s[:24]:
+        return "Access to the lobby server was denied."
+    if s.startswith("HTTP 4"):
+        return "The lobby server couldn't fulfill that request."
+    if s.startswith("HTTP 5"):
+        return "The lobby server reported an error."
+    if "invalid json" in low or "unexpected response" in low:
+        return "The lobby server sent an unexpected response."
+    return "Can't reach the lobby server. Check your internet and try again."
+
+
 WIDTH, HEIGHT = 1720, 990
 # Bottom RTS chrome (control groups, status, click-order panel). World draws above this strip.
 BOTTOM_BAR_H = 128
@@ -221,6 +250,44 @@ ORDER_PANEL_W = 208
 ORDER_PANEL_STANCE_STRIP_H = 36
 VIEW_W = WIDTH
 VIEW_H = HEIGHT - BOTTOM_BAR_H
+
+
+def _preload_http_client_stack() -> None:
+    """Import ssl/urllib on the main thread before any worker HTTP (reduces Win32 DLL init deadlocks)."""
+    try:
+        import ssl  # noqa: F401
+
+        ssl.create_default_context()
+    except Exception:
+        pass
+    try:
+        import urllib.error  # noqa: F401
+        import urllib.request  # noqa: F401
+    except Exception:
+        pass
+
+
+def _append_fleetrts_debug_log(line: str) -> None:
+    path = os.environ.get("FLEETRTS_DEBUG_LOG", "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.flush()
+    except OSError:
+        pass
+
+
+def _blit_internal_to_window(window: pygame.Surface, screen: pygame.Surface, win_w: int, win_h: int) -> None:
+    if win_w == WIDTH and win_h == HEIGHT:
+        window.blit(screen, (0, 0))
+    else:
+        scaled = pygame.transform.smoothscale(screen, (max(1, win_w), max(1, win_h)))
+        window.blit(scaled, (0, 0))
+    pygame.display.flip()
+
+
 CAM_PAN_SPEED = 520.0
 OBJECTIVE_RADIUS = 56.0
 
@@ -3424,10 +3491,15 @@ def draw_mp_hub(
     name_focus: bool,
     join_buffer: str,
     join_focus: bool,
-    net_err: Optional[str],
     lobby_browser_rows: List[Dict[str, Any]],
     lobby_browser_scroll: int,
     next_online_authority: str = "player",
+    status_primary: str = "",
+    status_detail: Optional[str] = None,
+    status_mode: str = "wait",
+    online_actions_ok: bool = False,
+    authority_config_ok: bool = False,
+    list_busy: bool = False,
 ) -> None:
     lay = mp_hub_menu_layout()
     pygame.draw.rect(surf, (8, 14, 24), lay.panel, border_radius=16)
@@ -3435,7 +3507,7 @@ def draw_mp_hub(
     title = font_big.render("Multiplayer", True, (230, 238, 250))
     surf.blit(title, (lay.panel.centerx - title.get_width() // 2, lay.panel.y + 18))
     sub = font_tiny.render(
-        "HTTP lobby list + quick join · TCP relay · default URL or override with FLEETRTS_HTTP",
+        "Play online with friends or host a custom game on this PC — no online account required.",
         True,
         (155, 175, 200),
     )
@@ -3444,11 +3516,32 @@ def draw_mp_hub(
     pygame.draw.rect(surf, (12, 20, 34), lay.art_rect, border_radius=12)
     pygame.draw.rect(surf, (45, 70, 98), lay.art_rect, width=1, border_radius=12)
 
+    st_y = lay.art_rect.y + 8
+    st_col_ok = (140, 200, 160)
+    st_col_wait = (200, 200, 140)
+    st_col_bad = (200, 150, 140)
+    if status_mode == "ok":
+        stc = st_col_ok
+    elif status_mode == "wait":
+        stc = st_col_wait
+    else:
+        stc = st_col_bad
+    sp = font_tiny.render(status_primary[:96] if status_primary else "…", True, stc)
+    surf.blit(sp, (lay.art_rect.x + 12, st_y))
+    if status_detail:
+        sd = font_tiny.render(status_detail[:96], True, (255, 170, 150))
+        surf.blit(sd, (lay.art_rect.x + 12, st_y + 16))
+
+    show_url = os.environ.get("FLEETRTS_SHOW_LOBBY_URL", "").strip().lower() in ("1", "true", "yes")
+    url_y = st_y + (34 if status_detail else 18)
+    if show_url and http_base:
+        surf.blit(font_tiny.render(f"Lobby server: {http_base[:68]}", True, (110, 140, 170)), (lay.art_rect.x + 12, url_y))
+
     nr = lay.name_entry_rect
     pygame.draw.rect(surf, (14, 22, 36), nr, border_radius=8)
     pygame.draw.rect(surf, (70, 120, 160) if name_focus else (50, 75, 100), nr, width=1, border_radius=8)
     surf.blit(
-        font_tiny.render("Your name (HTTP + relay) — used when you Create / Join online", True, (150, 175, 198)),
+        font_tiny.render("Your name — used when you create or join an online game", True, (150, 175, 198)),
         (nr.x + 6, nr.y + 4),
     )
     nd = name_buffer if name_buffer else "Player"
@@ -3460,7 +3553,7 @@ def draw_mp_hub(
     pygame.draw.rect(surf, (14, 22, 36), jr, border_radius=8)
     pygame.draw.rect(surf, (70, 120, 160) if join_focus else (50, 75, 100), jr, width=1, border_radius=8)
     surf.blit(
-        font_tiny.render("Host join code (8 chars) — click here before Join with code", True, (150, 175, 198)),
+        font_tiny.render("Friend's game code (8 characters) — click here, then use Join with code", True, (150, 175, 198)),
         (jr.x + 6, jr.y + 4),
     )
     jy = jr.y + 22
@@ -3476,7 +3569,7 @@ def draw_mp_hub(
     hdr_h = 22
     pygame.draw.line(surf, (55, 85, 115), (lr.x + 4, lr.y + hdr_h), (lr.right - 4, lr.y + hdr_h))
     surf.blit(
-        font_tiny.render("Open lobbies — click header strip to refresh · click row to join if joinable", True, (140, 170, 200)),
+        font_tiny.render("Open games — click the header to refresh · click a row to join when available", True, (140, 170, 200)),
         (lr.x + 6, lr.y + 3),
     )
     row_h = 20
@@ -3496,31 +3589,20 @@ def draw_mp_hub(
         surf.blit(font_tiny.render(line, True, (200, 215, 235) if jok else (120, 130, 145)), (lr.x + 8, yy))
 
     auth_l = (
-        "Dedicated (run headless sim on droplet)"
+        "Game server runs combat (for online hosts)"
         if next_online_authority == "dedicated"
-        else "Player host (this PC runs combat)"
+        else "This PC runs combat when you’re the online host"
     )
     ar = lay.authority_strip
     pygame.draw.rect(surf, (14, 24, 38), ar, border_radius=6)
     pygame.draw.rect(surf, (70, 110, 150), ar, width=1, border_radius=6)
-    srv = bool(http_base and NET_MP)
     auth_hint = (
-        f"Next online Create lobby: {auth_l}  ·  F4 or click strip to toggle"
-        if srv
-        else "Online URL disabled (empty FLEETRTS_HTTP) — clear env or edit DEFAULT_FLEETRTS_LOBBY_HTTP"
+        f"Who runs the battle for online games: {auth_l}  ·  F4 or click to toggle"
+        if authority_config_ok
+        else "Online options below stay off until a lobby server is available."
     )
-    surf.blit(font_tiny.render(auth_hint[:110], True, (160, 188, 215) if srv else (120, 130, 145)), (ar.x + 6, ar.y + 4))
-
-    ax, ay = lay.art_rect.x + 14, lay.art_rect.bottom - 22
-    if http_base:
-        surf.blit(font_tiny.render(f"HTTP: {http_base[:72]}", True, (130, 165, 195)), (ax, ay))
-    else:
-        surf.blit(
-            font_tiny.render("Online lobby URL disabled — no default and empty FLEETRTS_HTTP", True, (160, 120, 120)),
-            (ax, ay),
-        )
-    if net_err:
-        surf.blit(font_tiny.render(net_err[:100], True, (255, 160, 140)), (lay.art_rect.x + 14, ay - 16))
+    ah_col = (160, 188, 215) if authority_config_ok else (120, 130, 145)
+    surf.blit(font_tiny.render(auth_hint[:118], True, ah_col), (ar.x + 6, ar.y + 4))
 
     def _btn(r: pygame.Rect, label: str, hot: bool) -> None:
         pygame.draw.rect(surf, (38, 78, 58) if hot else (36, 52, 72), r, border_radius=10)
@@ -3535,8 +3617,7 @@ def draw_mp_hub(
         surf.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
 
     _btn(lay.btn_host, "Host custom game (local)", True)
-    srv_ok = bool(http_base and NET_MP)
-    if srv_ok:
+    if online_actions_ok:
         _btn(lay.btn_quick_join, "Quick join (matchmaking)", True)
         _btn(lay.btn_srv_create, "Create online lobby", True)
         _btn(lay.btn_srv_join, "Join with code", True)
@@ -3546,7 +3627,7 @@ def draw_mp_hub(
         _btn_dis(lay.btn_srv_join, "Join with code")
     _btn(lay.btn_back, "Back", False)
     hint = font_tiny.render(
-        "Quick join joins first open lobby or creates a public_queue waiting lobby · ESC — back",
+        "Quick join finds an open game or starts a public waiting lobby · ESC — back to main menu",
         True,
         (130, 150, 172),
     )
@@ -3697,6 +3778,23 @@ def run() -> None:
     screen = pygame.Surface((WIDTH, HEIGHT))
     win_w, win_h = WIDTH, HEIGHT
     window = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+    _preload_http_client_stack()
+    if os.environ.get("FLEETRTS_FAULTHANDLER", "").strip().lower() in ("1", "true", "yes"):
+        import faulthandler
+
+        _fh_out: Any = sys.stderr
+        _fh_path = os.environ.get("FLEETRTS_FAULTHANDLER_FILE", "").strip()
+        if _fh_path:
+            try:
+                _fh_out = open(_fh_path, "a", encoding="utf-8")
+            except OSError:
+                _fh_out = sys.stderr
+        faulthandler.enable(all_threads=True, file=_fh_out)
+        try:
+            _fh_sec = int(os.environ.get("FLEETRTS_FAULTHANDLER_INTERVAL", "15") or "15")
+        except ValueError:
+            _fh_sec = 15
+        faulthandler.dump_traceback_later(max(5, _fh_sec), repeat=True, file=_fh_out)
 
     def to_internal(pos: Tuple[int, int]) -> Tuple[int, int]:
         mx, my = pos
@@ -3764,7 +3862,11 @@ def run() -> None:
     mp_join_focus: bool = False
     mp_hub_lobby_rows: List[Dict[str, Any]] = []
     mp_hub_lobby_scroll = 0
-    mp_hub_list_last_ms = -1
+    # None = first hub frame stamps time; <0 = user requested refresh; else ticks when last fetch started (auto every 5s).
+    mp_hub_list_last_ms: Optional[int] = None
+    mp_hub_list_busy = False
+    mp_hub_list_started_ms: int = 0
+    mp_hub_list_q: queue.Queue = queue.Queue()
     mp_http_authority_choice: str = "player"
     mp_chat_log: List[str] = []
     mp_chat_input: str = ""
@@ -3774,6 +3876,9 @@ def run() -> None:
     mp_applied_remote_start_gen = 0
     remote_loadouts: Dict[str, bool] = {}
     mp_net_err: Optional[str] = None
+    mp_hub_svc_state: str = "offline"
+    mp_hub_user_message: Optional[str] = None
+    mp_hub_last_ok_ms: int = 0
     remote_lobby_id: Optional[str] = None
     remote_lobby_short: Optional[str] = None
     remote_lobby_http_players: List[str] = []
@@ -4149,17 +4254,98 @@ def run() -> None:
     def mp_sel_craft_labels() -> List[str]:
         return [c.label for c in crafts if c.side == "player" and c.selected and not c.dead]
 
+    _hub_debug_log = os.environ.get("FLEETRTS_DEBUG_LOG", "").strip()
+    _hub_http_disabled = os.environ.get("FLEETRTS_HUB_DISABLE_HTTP", "").strip().lower() in ("1", "true", "yes")
+
+    def _mp_hub_can_use_http() -> bool:
+        return (
+            not _hub_http_disabled
+            and bool(fleet_http_base)
+            and NET_MP
+            and list_lobbies is not None
+        )
+
+    mp_hub_debug_frames = 0
+
     running = True
     while running:
         dt = clock.tick(FPS) / 1000.0
-        if phase == "mp_hub" and fleet_http_base and NET_MP and list_lobbies is not None:
-            _hub_now = pygame.time.get_ticks()
-            if _hub_now - mp_hub_list_last_ms > 5000 or mp_hub_list_last_ms < 0:
-                mp_hub_list_last_ms = _hub_now
-                try:
-                    mp_hub_lobby_rows = list_lobbies(fleet_http_base)
-                except FleetHttpError:
-                    pass
+        mp_hub_online_actions_ok = False
+        if phase == "mp_hub" and _hub_debug_log:
+            mp_hub_debug_frames += 1
+            if mp_hub_debug_frames <= 5 or mp_hub_debug_frames % 120 == 0:
+                _append_fleetrts_debug_log(
+                    f"mp_hub alive frame={mp_hub_debug_frames} t={pygame.time.get_ticks()} "
+                    f"busy={mp_hub_list_busy} svc={mp_hub_svc_state!r} detail={mp_hub_user_message!r}"
+                )
+        elif phase != "mp_hub":
+            mp_hub_debug_frames = 0
+        if phase == "mp_hub":
+            if not _mp_hub_can_use_http():
+                while True:
+                    try:
+                        mp_hub_list_q.get_nowait()
+                    except queue.Empty:
+                        break
+                mp_hub_list_busy = False
+                if not NET_MP or list_lobbies is None:
+                    mp_hub_svc_state = "disabled_build"
+                else:
+                    mp_hub_svc_state = "disabled_config"
+            else:
+                _hub_now = pygame.time.get_ticks()
+                while True:
+                    try:
+                        _kind, _payload, _hub_sound = mp_hub_list_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    mp_hub_list_busy = False
+                    if _kind == "ok":
+                        mp_hub_lobby_rows = _payload
+                        mp_hub_svc_state = "online"
+                        mp_hub_last_ok_ms = _hub_now
+                        mp_hub_user_message = None
+                        if _hub_sound:
+                            audio.play_positive()
+                    else:
+                        _raw_e = str(_payload)
+                        print(f"[FleetRTS hub] list_lobbies error: {_raw_e}", file=sys.stderr)
+                        mp_hub_lobby_rows = []
+                        mp_hub_svc_state = "offline"
+                        mp_hub_user_message = _friendly_hub_http_message(_raw_e)
+                        if _hub_sound:
+                            audio.play_negative()
+                if mp_hub_list_busy and (_hub_now - mp_hub_list_started_ms) > 15000:
+                    mp_hub_list_busy = False
+                    _stall = "Lobby list stalled (network thread). Try FLEETRTS_HUB_DISABLE_HTTP=1 to test UI."
+                    print(f"[FleetRTS hub] {_stall}", file=sys.stderr)
+                    mp_hub_svc_state = "offline"
+                    mp_hub_user_message = _friendly_hub_http_message(_stall)
+                    mp_hub_lobby_rows = []
+                if mp_hub_list_last_ms is None:
+                    mp_hub_list_last_ms = _hub_now
+                elif not mp_hub_list_busy:
+                    _hub_manual = mp_hub_list_last_ms < 0
+                    _hub_interval = (_hub_now - mp_hub_list_last_ms) >= 5000
+                    if _hub_manual or _hub_interval:
+                        if mp_hub_svc_state != "online":
+                            mp_hub_svc_state = "checking"
+                            mp_hub_user_message = None
+                        mp_hub_list_last_ms = _hub_now
+                        mp_hub_list_busy = True
+                        mp_hub_list_started_ms = _hub_now
+                        _hub_base = fleet_http_base
+                        _hub_notify = _hub_manual
+
+                        def _hub_list_worker() -> None:
+                            try:
+                                rows = list_lobbies(_hub_base)
+                                mp_hub_list_q.put(("ok", rows, _hub_notify))
+                            except Exception as e:
+                                mp_hub_list_q.put(("err", str(e)[:160], _hub_notify))
+
+                        threading.Thread(target=_hub_list_worker, daemon=True).start()
+            mp_hub_online_actions_ok = _mp_hub_can_use_http() and mp_hub_svc_state == "online"
         if (
             mp_sync_match_active()
             and mp_relay is not None
@@ -4252,8 +4438,19 @@ def run() -> None:
                     audio.play_positive()
                 elif lay.multiplayer_btn.collidepoint(mx, my):
                     phase = "mp_hub"
+                    mp_net_err = None
                     mp_hub_list_last_ms = -1
                     mp_hub_lobby_scroll = 0
+                    mp_hub_lobby_rows = []
+                    if _mp_hub_can_use_http():
+                        mp_hub_svc_state = "checking"
+                        mp_hub_user_message = None
+                    elif not NET_MP or list_lobbies is None:
+                        mp_hub_svc_state = "disabled_build"
+                        mp_hub_user_message = None
+                    else:
+                        mp_hub_svc_state = "disabled_config"
+                        mp_hub_user_message = None
                     audio.play_positive()
                 elif lay.tts_toggle.collidepoint(mx, my):
                     audio.tts_voice_enabled = not audio.tts_voice_enabled
@@ -4324,13 +4521,7 @@ def run() -> None:
                     phase = "mp_lobby"
                     mp_ready = False
                     audio.play_positive()
-                elif (
-                    layh.btn_quick_join.collidepoint(mx, my)
-                    and fleet_http_base
-                    and NET_MP
-                    and quick_join is not None
-                ):
-                    mp_net_err = None
+                elif layh.btn_quick_join.collidepoint(mx, my) and mp_hub_online_actions_ok and quick_join is not None:
                     try:
                         sync_mp_player_name_from_field()
                         lob, joined_as, _qj = quick_join(fleet_http_base, mp_player_name)
@@ -4349,12 +4540,11 @@ def run() -> None:
                             mp_net_err = mp_relay.error
                         audio.play_positive()
                     except FleetHttpError as e:
-                        mp_net_err = str(e)
+                        mp_hub_user_message = _friendly_hub_http_message(str(e))
                         audio.play_negative()
                 elif (
                     layh.lobby_list_rect.collidepoint(mx, my)
-                    and fleet_http_base
-                    and NET_MP
+                    and _mp_hub_can_use_http()
                     and join_lobby is not None
                     and list_lobbies is not None
                 ):
@@ -4362,20 +4552,16 @@ def run() -> None:
                     rel_y = my - layh.lobby_list_rect.y
                     if rel_y < hdr_c:
                         mp_hub_list_last_ms = -1
-                        try:
-                            mp_hub_lobby_rows = list_lobbies(fleet_http_base)
-                        except FleetHttpError as e:
-                            mp_net_err = str(e)
-                            audio.play_negative()
-                        else:
-                            audio.play_positive()
                     else:
                         row_hc = 20
                         row_i = (rel_y - hdr_c - 4) // row_hc + mp_hub_lobby_scroll
                         if 0 <= row_i < len(mp_hub_lobby_rows):
                             rowd = mp_hub_lobby_rows[row_i]
-                            if rowd.get("joinable") and rowd.get("id"):
-                                mp_net_err = None
+                            if (
+                                mp_hub_online_actions_ok
+                                and rowd.get("joinable")
+                                and rowd.get("id")
+                            ):
                                 try:
                                     sync_mp_player_name_from_field()
                                     lob, joined_as = join_lobby(
@@ -4396,15 +4582,9 @@ def run() -> None:
                                         mp_net_err = mp_relay.error
                                     audio.play_positive()
                                 except FleetHttpError as e:
-                                    mp_net_err = str(e)
+                                    mp_hub_user_message = _friendly_hub_http_message(str(e))
                                     audio.play_negative()
-                elif (
-                    layh.btn_srv_create.collidepoint(mx, my)
-                    and fleet_http_base
-                    and NET_MP
-                    and create_lobby is not None
-                ):
-                    mp_net_err = None
+                elif layh.btn_srv_create.collidepoint(mx, my) and mp_hub_online_actions_ok and create_lobby is not None:
                     try:
                         sync_mp_player_name_from_field()
                         lob = create_lobby(
@@ -4424,19 +4604,17 @@ def run() -> None:
                             mp_net_err = mp_relay.error
                         audio.play_positive()
                     except FleetHttpError as e:
-                        mp_net_err = str(e)
+                        mp_hub_user_message = _friendly_hub_http_message(str(e))
                         audio.play_negative()
                 elif (
                     layh.btn_srv_join.collidepoint(mx, my)
-                    and fleet_http_base
-                    and NET_MP
+                    and mp_hub_online_actions_ok
                     and get_lobby_by_short_id is not None
                     and join_lobby is not None
                 ):
-                    mp_net_err = None
                     sid = mp_join_id_buffer.strip().lower()
                     if len(sid) < 6:
-                        mp_net_err = "Enter the host's join code (8 characters)."
+                        mp_hub_user_message = "Enter the host's game code (8 characters)."
                         audio.play_negative()
                     else:
                         try:
@@ -4458,7 +4636,7 @@ def run() -> None:
                                 mp_net_err = mp_relay.error
                             audio.play_positive()
                         except FleetHttpError as e:
-                            mp_net_err = str(e)
+                            mp_hub_user_message = _friendly_hub_http_message(str(e))
                             audio.play_negative()
             elif phase == "mp_lobby" and event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
@@ -4467,6 +4645,18 @@ def run() -> None:
                     else:
                         disconnect_mp_session()
                         phase = "mp_hub"
+                        mp_net_err = None
+                        mp_hub_list_last_ms = -1
+                        mp_hub_lobby_rows = []
+                        if _mp_hub_can_use_http():
+                            mp_hub_svc_state = "checking"
+                            mp_hub_user_message = None
+                        elif not NET_MP or list_lobbies is None:
+                            mp_hub_svc_state = "disabled_build"
+                            mp_hub_user_message = None
+                        else:
+                            mp_hub_svc_state = "disabled_config"
+                            mp_hub_user_message = None
                     audio.play_positive()
                 elif mp_chat_focus and remote_lobby_id:
                     if event.key == pygame.K_BACKSPACE:
@@ -4494,6 +4684,18 @@ def run() -> None:
                 if layl.btn_back.collidepoint(mx, my):
                     disconnect_mp_session()
                     phase = "mp_hub"
+                    mp_net_err = None
+                    mp_hub_list_last_ms = -1
+                    mp_hub_lobby_rows = []
+                    if _mp_hub_can_use_http():
+                        mp_hub_svc_state = "checking"
+                        mp_hub_user_message = None
+                    elif not NET_MP or list_lobbies is None:
+                        mp_hub_svc_state = "disabled_build"
+                        mp_hub_user_message = None
+                    else:
+                        mp_hub_svc_state = "disabled_config"
+                        mp_hub_user_message = None
                     audio.play_positive()
                 elif layl.btn_fleet.collidepoint(mx, my):
                     enter_ship_loadouts(True)
@@ -6058,15 +6260,35 @@ def run() -> None:
             draw_config_menu(screen, font, font_tiny, font_big, audio)
             ch = font.render("Audio — ENTER or Design fleet · Multiplayer opens LAN-flow stub", True, (190, 210, 220))
             screen.blit(ch, (12, HEIGHT - 26))
-            scaled = pygame.transform.smoothscale(screen, (max(1, win_w), max(1, win_h)))
-            window.blit(scaled, (0, 0))
-            pygame.display.flip()
+            _blit_internal_to_window(window, screen, win_w, win_h)
             continue
 
         if phase == "mp_hub":
             screen.fill((4, 12, 18))
             draw_starfield(screen, stars, cam_x, cam_y, WIDTH, HEIGHT)
             draw_world_edge(screen, cam_x, cam_y)
+            _auth_cfg = bool(fleet_http_base and NET_MP)
+            if not _mp_hub_can_use_http():
+                if not NET_MP or list_lobbies is None:
+                    _hp1, _hp2 = "Online multiplayer isn't available in this build.", None
+                elif _hub_http_disabled:
+                    _hp1, _hp2 = "Online lobby features are turned off.", None
+                else:
+                    _hp1, _hp2 = "No lobby server is configured for online play.", None
+                _hsm = "bad"
+            elif mp_hub_svc_state == "online":
+                _hp1, _hp2 = "Connected to the lobby server.", None
+                _hsm = "ok"
+            elif mp_hub_list_busy or mp_hub_svc_state == "checking":
+                _hp1, _hp2 = "Checking connection…", None
+                _hsm = "wait"
+            elif mp_hub_svc_state == "offline":
+                _hp1 = "Not connected to the lobby server."
+                _hp2 = mp_hub_user_message
+                _hsm = "bad"
+            else:
+                _hp1, _hp2 = "Checking connection…", None
+                _hsm = "wait"
             draw_mp_hub(
                 screen,
                 font,
@@ -6077,18 +6299,21 @@ def run() -> None:
                 name_focus=mp_name_focus,
                 join_buffer=mp_join_id_buffer,
                 join_focus=mp_join_focus,
-                net_err=mp_net_err,
                 lobby_browser_rows=mp_hub_lobby_rows,
                 lobby_browser_scroll=mp_hub_lobby_scroll,
                 next_online_authority=mp_http_authority_choice,
+                status_primary=_hp1,
+                status_detail=_hp2,
+                status_mode=_hsm,
+                online_actions_ok=mp_hub_online_actions_ok,
+                authority_config_ok=_auth_cfg,
+                list_busy=mp_hub_list_busy,
             )
             now_t = pygame.time.get_ticks()
             if now_t < mp_toast_until_ms:
                 tb = font_tiny.render(mp_toast_text, True, (255, 215, 140))
                 screen.blit(tb, (WIDTH // 2 - tb.get_width() // 2, HEIGHT - 36))
-            scaled = pygame.transform.smoothscale(screen, (max(1, win_w), max(1, win_h)))
-            window.blit(scaled, (0, 0))
-            pygame.display.flip()
+            _blit_internal_to_window(window, screen, win_w, win_h)
             continue
 
         if phase == "mp_lobby":
@@ -6165,9 +6390,7 @@ def run() -> None:
                 chat_input=mp_chat_input,
                 chat_focus=mp_chat_focus,
             )
-            scaled = pygame.transform.smoothscale(screen, (max(1, win_w), max(1, win_h)))
-            window.blit(scaled, (0, 0))
-            pygame.display.flip()
+            _blit_internal_to_window(window, screen, win_w, win_h)
             continue
 
         if phase == "ship_loadouts":
@@ -6209,9 +6432,7 @@ def run() -> None:
                 loadout_selected_i = max(0, min(loadout_selected_i, roster_n - 1))
             if mp_loadouts_active and remote_lobby_id and mp_relay is not None:
                 handle_mp_relay_events()
-            scaled = pygame.transform.smoothscale(screen, (max(1, win_w), max(1, win_h)))
-            window.blit(scaled, (0, 0))
-            pygame.display.flip()
+            _blit_internal_to_window(window, screen, win_w, win_h)
             continue
 
         if phase == "combat":
@@ -6664,9 +6885,7 @@ def run() -> None:
             surf = font.render(line, True, (190, 210, 220))
             screen.blit(surf, (12, y0 + i * 20))
 
-        scaled = pygame.transform.smoothscale(screen, (max(1, win_w), max(1, win_h)))
-        window.blit(scaled, (0, 0))
-        pygame.display.flip()
+        _blit_internal_to_window(window, screen, win_w, win_h)
 
     audio.shutdown()
     pygame.quit()

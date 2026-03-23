@@ -1,0 +1,163 @@
+FleetRTS — droplet commands cheat sheet
+========================================
+
+Current droplet (matches DEFAULT_FLEETRTS_LOBBY_HTTP in the Windows build)
+---------------------------------------------------------------------------
+  Public IP: 198.199.80.13
+  Lobby in browser/curl: http://198.199.80.13:8765/health
+  On the droplet, fleetrts.env must set:
+    export FLEETRTS_RELAY_HOST="198.199.80.13"
+
+Do this, then that (new droplet first time)
+--------------------------------------------
+  1) SSH into the droplet (DigitalOcean console or: ssh root@198.199.80.13).
+  2) Install deps if needed: sudo apt update && sudo apt install -y python3 git
+  3) Clone or upload FleetRTS to ~/FleetRTS (git clone …).
+  4) Open firewall once: sudo ufw allow 8765/tcp && sudo ufw allow 8766/tcp && sudo ufw enable
+  5) Config relay address: cp ~/FleetRTS/server/fleetrts.env.example ~/FleetRTS/server/fleetrts.env
+     then edit fleetrts.env so FLEETRTS_RELAY_HOST is 198.199.80.13 (see example file).
+  6) Start services: cd ~/FleetRTS && chmod +x server/start_fleetrts.sh server/stop_fleetrts.sh && ./server/start_fleetrts.sh
+  7) On the droplet: curl -s http://127.0.0.1:8765/health  (should return JSON with "ok": true).
+  8) From your Windows PC: curl.exe -s http://198.199.80.13:8765/health  (same idea; if it fails, check UFW/DO cloud firewall).
+  9) Run FleetRTS.exe (or set FLEETRTS_HTTP=http://198.199.80.13:8765 if you override).
+
+Paths assume the repo lives at ~/FleetRTS (git clone on the droplet).
+
+Start the lobby HTTP stub + TCP relay (no alias)
+-------------------------------------------------
+  cd ~/FleetRTS
+  chmod +x server/start_fleetrts.sh server/stop_fleetrts.sh
+  ./server/start_fleetrts.sh
+
+Stop
+----
+  cd ~/FleetRTS
+  ./server/stop_fleetrts.sh
+
+If start says "already running" but you know it is not:
+  ./server/start_fleetrts.sh --force
+
+Logs
+----
+  ~/fleetrts-logs/stub.log
+  ~/fleetrts-logs/relay.log
+
+Quick health check (stub must be running)
+-----------------------------------------
+  curl -s http://127.0.0.1:8765/health
+
+Config (once per droplet)
+-------------------------
+  cp server/fleetrts.env.example server/fleetrts.env
+  nano server/fleetrts.env
+  Set: export FLEETRTS_RELAY_HOST="YOUR_PUBLIC_IPV4"
+
+Update code after you git push from your PC
+-------------------------------------------
+  cd ~/FleetRTS && git pull
+
+Optional: short commands start_server / stop_server
+-----------------------------------------------------
+  Add these lines to ~/.bashrc (nano ~/.bashrc), save, then:
+
+    source ~/.bashrc
+
+  Lines to append:
+
+    alias start_server='$HOME/FleetRTS/server/start_fleetrts.sh'
+    alias stop_server='$HOME/FleetRTS/server/stop_fleetrts.sh'
+
+  New login shells can then run:
+
+    start_server
+    stop_server
+
+Firewall (Ubuntu UFW, once if needed)
+-------------------------------------
+  sudo ufw allow 8765/tcp
+  sudo ufw allow 8766/tcp
+  sudo ufw enable
+
+
+================================================================================
+NEWBIE NOTES — stuff worth “getting” once
+================================================================================
+
+What the droplet is doing vs your gaming PC
+---------------------------------------------
+  Your DigitalOcean droplet is just a small Linux computer on the internet. It runs
+  two Python programs for multiplayer matchmaking and chat-style message passing.
+  The actual pygame game (graphics, your mouse) still runs on each player’s PC.
+  You do NOT need to install the Windows .exe on the droplet for normal testing.
+
+The two programs you start with start_fleetrts.sh
+-------------------------------------------------
+  1) droplet_http_stub.py  — “Bulletin board” for lobbies (who is in which room,
+     join codes, list of open games). Listens on port 8765. This is HTTP, like a
+     tiny website API your game talks to.
+
+  2) tcp_relay.py          — “Party line” for everyone in the same lobby. Once
+     players join a room, their game clients connect here and swap JSON messages
+     (chat, ready, start match, combat commands, snapshots). Listens on port 8766.
+
+Why FLEETRTS_RELAY_HOST must be your public IP
+----------------------------------------------
+  When someone creates a lobby, the HTTP stub puts relay address info in the JSON.
+  If that said 127.0.0.1, it would mean “the relay is on THIS machine only” —
+  useless for your friend. Setting FLEETRTS_RELAY_HOST to the droplet’s public IPv4
+  tells every client: “connect the relay to this internet address.”
+
+Ports 8765 and 8766
+-------------------
+  A port is like a door number on the server. 8765 = HTTP lobby API. 8766 = TCP
+  relay. Your firewall (and DigitalOcean’s cloud firewall if you use one) must
+  allow inbound TCP on BOTH, or one side of multiplayer will fail.
+
+What “git pull” on the droplet does
+-----------------------------------
+  Your code “lives” in GitHub after you push from your PC. The droplet does not
+  magically update. ssh in, cd ~/FleetRTS, git pull — that downloads the latest
+  server scripts (and everything else in the repo) from GitHub onto the droplet.
+
+What runs in the background when you start_server
+-------------------------------------------------
+  start_fleetrts.sh uses nohup so the processes keep running after you close the
+  browser console tab. stop_fleetrts.sh reads the pid file and sends “please exit”
+  to those processes. If you reboot the droplet, you must start_server again.
+
+The Windows zip (PyInstaller dist/) and the droplet
+-------------------------------------------------
+  dist/FleetRTS/ is for friends’ Windows PCs only. The droplet only needs the
+  git repo + python3 for the two server scripts (and more deps only if you run
+  headless_combat_host.py for “dedicated” combat).
+
+Default lobby URL in the game (demo_game.py)
+---------------------------------------------
+  The client has DEFAULT_FLEETRTS_LOBBY_HTTP pointing at your HTTP stub. If your
+  droplet’s public IP ever changes, update that constant and rebuild the .exe for
+  friends, OR tell them to set environment variable FLEETRTS_HTTP to override.
+
+Player-host vs dedicated (short version)
+----------------------------------------
+  Player-host: whoever created the lobby runs the combat simulation on their PC;
+  others follow snapshots. Good for quick tests.
+
+  Dedicated: a third process (headless_combat_host.py) on a machine that can run
+  it steps the sim on the server; everyone is a “viewer + sends orders.” Optional,
+  more setup, not required for your first friend test.
+
+When something breaks, check in order
+-------------------------------------
+  1) curl http://127.0.0.1:8765/health on the droplet — stub alive?
+  2) tail -n 50 ~/fleetrts-logs/stub.log and relay.log — any Python errors?
+  3) From your home PC: curl http://YOUR_PUBLIC_IP:8765/health — if this fails
+     but (1) works, it’s usually firewall or wrong IP.
+  4) Game says relay error — FLEETRTS_RELAY_HOST wrong or relay not running or
+     port 8766 blocked.
+
+Build Commands (Windows, from repo root c:\projects\python\FleetRTS)
+--------------------------------------------------------------------
+  Close FleetRTS.exe if open (or builds may fail deleting dist\FleetRTS).
+  pyinstaller -y FleetRTS.spec
+  Output: dist\FleetRTS\FleetRTS.exe (folder is the whole app; zip it for friends).
+  If dist is locked, use: pyinstaller -y --distpath dist_build FleetRTS.spec
