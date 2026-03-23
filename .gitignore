@@ -4,3 +4,6 @@ dist/
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# Droplet local relay host / optional secrets (copy from server/fleetrts.env.example)
+server/fleetrts.env

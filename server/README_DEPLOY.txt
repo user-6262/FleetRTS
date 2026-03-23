@@ -56,6 +56,26 @@ Upload to droplet (example)
   The TCP relay is harder to TLS terminate; for now treat it as LAN/VPN-only or plan
   a WebSocket/TLS relay later.
 
+start_fleetrts.sh / stop_fleetrts.sh (git clone on droplet)
+------------------------------------------------------------
+  One command starts stub + relay in the background; logs go to ~/fleetrts-logs/.
+
+    cd ~/FleetRTS
+    cp server/fleetrts.env.example server/fleetrts.env
+    nano server/fleetrts.env    # set FLEETRTS_RELAY_HOST to this droplet's public IP
+
+    chmod +x server/start_fleetrts.sh server/stop_fleetrts.sh
+    ./server/start_fleetrts.sh
+
+  Stop:
+
+    ./server/stop_fleetrts.sh
+
+  server/fleetrts.env is gitignored (local only). Optional short names — add to ~/.bashrc:
+
+    alias start_server='$HOME/FleetRTS/server/start_fleetrts.sh'
+    alias stop_server='$HOME/FleetRTS/server/stop_fleetrts.sh'
+
 systemd (optional)
 ------------------
   Two units are provided:
