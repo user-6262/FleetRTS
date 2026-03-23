@@ -12,9 +12,17 @@ from typing import Any, List, Optional
 import demo_game as dg
 
 try:
-    from mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+    from mp_spawn_layout import (
+        coop_player_spawn_anchor,
+        normalize_mp_player_order,
+        pvp_player_spawn_anchor,
+    )
 except ImportError:
-    from core.mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+    from core.mp_spawn_layout import (
+        coop_player_spawn_anchor,
+        normalize_mp_player_order,
+        pvp_player_spawn_anchor,
+    )
 
 
 def bootstrap_mp_combat_match(
@@ -33,7 +41,7 @@ def bootstrap_mp_combat_match(
     groups.clear()
     crafts.clear()
     if isinstance(player_setup, dict) and isinstance(player_setup.get("players"), list):
-        players = [str(p)[:48] for p in player_setup.get("players", []) if str(p).strip()]
+        players = normalize_mp_player_order(player_setup.get("players") or [])
         colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
         designs = player_setup.get("designs") if isinstance(player_setup.get("designs"), dict) else {}
         ax0, ay0 = dg.deploy_anchor_xy()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Iterable, List, Tuple
 
 try:
     from combat_constants import WORLD_H, WORLD_W
@@ -28,3 +28,8 @@ def pvp_player_spawn_anchor(player_index: int, n_players: int) -> Tuple[float, f
     rx = WORLD_W * 0.80 - (ri % 2) * 210.0
     ry = WORLD_H * 0.36 + (ri // 2) * 210.0
     return rx, ry
+
+
+def normalize_mp_player_order(players: Iterable[str]) -> List[str]:
+    """Case-insensitive sort so host, clients, and headless agree on spawn indices."""
+    return sorted((str(p)[:48] for p in players if str(p).strip()), key=lambda s: s.lower())[:8]

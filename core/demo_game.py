@@ -130,9 +130,9 @@ except ImportError:
     from core.combat_sim import CombatAudioEvents, CombatSimHooks, apply_combat_death_audio, step_combat_frame
 
 try:
-    from mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+    from mp_spawn_layout import coop_player_spawn_anchor, normalize_mp_player_order, pvp_player_spawn_anchor
 except ImportError:
-    from core.mp_spawn_layout import coop_player_spawn_anchor, pvp_player_spawn_anchor
+    from core.mp_spawn_layout import coop_player_spawn_anchor, normalize_mp_player_order, pvp_player_spawn_anchor
 
 try:
     from combat_mp import apply_combat_command
@@ -2349,6 +2349,42 @@ def reset_player_spawn_positions(groups: List[Group], crafts: List[Craft]) -> No
     snap_strike_crafts_to_carriers(crafts)
 
 
+def reset_mp_fleets_for_lobby(
+    groups: List[Group],
+    crafts: List[Craft],
+    *,
+    mp_mode_coop: bool,
+    roster_names: Optional[List[str]] = None,
+) -> None:
+    """Spread surviving capitals by owner for MP lobby preview (labels are prefixed, not CV-1)."""
+    owners_caps: Dict[str, List[Group]] = {}
+    for g in groups:
+        if g.side == "player" and not g.dead and g.render_capital:
+            oid = str(getattr(g, "owner_id", "")).strip() or "player"
+            owners_caps.setdefault(oid, []).append(g)
+    if roster_names:
+        ordered = [n for n in roster_names if n in owners_caps]
+        for oid in sorted(owners_caps.keys(), key=lambda s: s.lower()):
+            if oid not in ordered:
+                ordered.append(oid)
+    else:
+        ordered = sorted(owners_caps.keys(), key=lambda s: s.lower())
+    ordered = ordered[:8]
+    ax0, ay0 = deploy_anchor_xy()
+    n_pl = max(1, min(len(ordered), 8))
+    for i, owner in enumerate(ordered):
+        caps = sorted(owners_caps.get(owner, []), key=lambda g: g.label)
+        if mp_mode_coop:
+            ax, ay = coop_player_spawn_anchor(i, ax0, ay0)
+        else:
+            ax, ay = pvp_player_spawn_anchor(i, n_pl)
+        for j, g in enumerate(caps):
+            g.x = ax - 320 + (j % 6) * 150.0
+            g.y = ay + (j // 6) * 56.0
+            g.waypoint = None
+    snap_strike_crafts_to_carriers(crafts)
+
+
 def player_capital_count(groups: List[Group]) -> int:
     return sum(1 for g in groups if g.side == "player" and not g.dead and g.render_capital)
 
@@ -4103,9 +4139,20 @@ def draw_mp_lobby(
     )
     rock_v = "Asteroid field ON" if use_asteroids else "Asteroid field OFF"
     _draw_mp_lobby_setting_row(surf, font, font_tiny, lay.row_rocks, "World", rock_v, host)
-    pressure_labels = ("Standard enemies", "Heavier spawns", "Siege-style", "Custom / open")
-    ei = max(0, min(enemy_pressure_i, len(pressure_labels) - 1))
-    _draw_mp_lobby_setting_row(surf, font, font_tiny, lay.row_enemy, "Enemy pressure", pressure_labels[ei], host)
+    if coop:
+        pressure_labels = ("Standard enemies", "Heavier spawns", "Siege-style", "Custom / open")
+        ei = max(0, min(enemy_pressure_i, len(pressure_labels) - 1))
+        _draw_mp_lobby_setting_row(surf, font, font_tiny, lay.row_enemy, "Enemy pressure", pressure_labels[ei], host)
+    else:
+        _draw_mp_lobby_setting_row(
+            surf,
+            font,
+            font_tiny,
+            lay.row_enemy,
+            "Enemy pressure",
+            "Off (PvP — no AI waves)",
+            False,
+        )
 
     lr, ir = lay.chat_log_rect, lay.chat_input_rect
     pygame.draw.rect(surf, (12, 18, 28), lr, border_radius=8)
@@ -4497,11 +4544,11 @@ def run() -> None:
         if isinstance(player_setup, dict) and isinstance(player_setup.get("players"), list):
             groups.clear()
             crafts.clear()
-            players = [str(p)[:48] for p in player_setup.get("players", []) if str(p).strip()]
+            players = normalize_mp_player_order(player_setup.get("players") or [])
+            if mp_player_name not in players:
+                players = normalize_mp_player_order(list(players) + [mp_player_name])
             colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
             designs = player_setup.get("designs") if isinstance(player_setup.get("designs"), dict) else {}
-            if mp_player_name not in players:
-                players.insert(0, mp_player_name)
             ax0, ay0 = deploy_anchor_xy()
             n_pl = max(1, min(len(players), 8))
 
@@ -4704,6 +4751,8 @@ def run() -> None:
                         mp_use_asteroids = bool(body.get("use_asteroids", mp_use_asteroids))
                         ep = int(body.get("enemy_pressure", mp_enemy_pressure))
                         mp_enemy_pressure = max(0, min(ep, 3))
+                        if not mp_mode_coop:
+                            mp_enemy_pressure = 0
                 elif isinstance(body, dict) and body.get("t") == COMBAT_CMD:
                     _host_runs_sim = mp_lobby_host and mp_lobby_authoritative != "dedicated"
                     if (
@@ -4758,6 +4807,85 @@ def run() -> None:
 
     def mp_is_net_client() -> bool:
         return bool(mp_net_combat_active() and not mp_local_runs_authoritative_sim())
+
+    def mp_snapshot_broadcast_authority() -> bool:
+        """Player lobby host who runs the combat sim (not dedicated relay)."""
+        return bool(
+            NET_MP
+            and remote_lobby_id
+            and mp_relay is not None
+            and not mp_relay.error
+            and post_combat_phase == "mp_lobby"
+            and mp_lobby_host
+            and mp_lobby_authoritative != "dedicated"
+        )
+
+    def mp_receives_combat_snapshots() -> bool:
+        return bool(
+            mp_sync_match_active()
+            and phase in ("combat", "debrief")
+            and not mp_snapshot_broadcast_authority()
+        )
+
+    def _mp_apply_pending_snapshot(now_ms_frame: int) -> None:
+        nonlocal mp_pending_snap, mp_client_last_snap_tick, outcome, phase, ping_ready_at_ms
+        nonlocal salvage, run_total_score, last_salvage_gain, store_selected, store_hover, mp_desync_text
+        nonlocal mp_desync_until_ms
+        if mp_pending_snap is None:
+            return
+        body = mp_pending_snap
+        mp_pending_snap = None
+        tsn = int(body.get("tick", -9))
+        if tsn <= mp_client_last_snap_tick:
+            return
+        st = body.get("state")
+        if not isinstance(st, dict):
+            return
+        hx = str(body.get("state_hash", ""))
+        lh = hash_state_dict(st)
+        if lh != hx:
+            mp_desync_text = f"DESYNC hash tick={tsn}"
+            mp_desync_until_ms = now_ms_frame + 8000
+            print(f"[FleetRTS MP] {mp_desync_text} local={lh[:16]}… host={hx[:16]}…")
+        (
+            _t,
+            snap_outcome,
+            snap_phase,
+            snap_ping_ms,
+            snap_salvage,
+            snap_score,
+            snap_last_sg,
+            snap_store_sel,
+            snap_store_hov,
+        ) = apply_snapshot_state(
+            data=data,
+            state=st,
+            mission=mission,
+            groups=groups,
+            crafts=crafts,
+            missiles=missiles,
+            ballistics=ballistics,
+            vfx_sparks=vfx_sparks,
+            vfx_beams=vfx_beams,
+            supplies=supplies,
+            pd_rof_mult=pd_rof_mult,
+            cg_weapons_free=cg_weapons_free,
+            control_groups=control_groups,
+            fog=fog,
+            active_pings=active_pings,
+            sensor_ghosts=sensor_ghosts,
+            seeker_ghosts=seeker_ghosts,
+            ping_ghost_anchor_labels=ping_ghost_anchor_labels,
+        )
+        ping_ready_at_ms = snap_ping_ms
+        outcome = snap_outcome
+        phase = snap_phase
+        salvage[0] = int(snap_salvage)
+        run_total_score = snap_score
+        last_salvage_gain = snap_last_sg
+        store_selected = snap_store_sel
+        store_hover = snap_store_hov
+        mp_client_last_snap_tick = tsn
 
     def mp_send_client(kind: str, payload: Optional[Dict[str, Any]] = None) -> bool:
         nonlocal mp_client_cmd_seq
@@ -4986,6 +5114,9 @@ def run() -> None:
             pause_main_menu_hover = False
         if phase == "debrief":
             debrief_hits, debrief_pr, _ = debrief_hit_regions()
+            if post_combat_phase == "mp_lobby" and bool(getattr(mission, "mp_pvp", False)):
+                debrief_hits = []
+                debrief_pr = pygame.Rect(0, 0, 0, 0)
         else:
             debrief_hits = []
             debrief_pr = pygame.Rect(0, 0, 0, 0)
@@ -5475,7 +5606,8 @@ def run() -> None:
                                 mseed = random.randint(1, 2**31 - 1)
                                 _players = [p for p in remote_relay_players if isinstance(p, str) and p.strip()]
                                 if mp_player_name not in _players:
-                                    _players.insert(0, mp_player_name)
+                                    _players.append(mp_player_name)
+                                _players = normalize_mp_player_order(_players)
                                 _colors: Dict[str, int] = {mp_player_name: int(mp_player_color_id)}
                                 for _pn, _cid in remote_player_colors.items():
                                     _colors[str(_pn)] = int(max(0, min(int(_cid), 5)))
@@ -5507,6 +5639,8 @@ def run() -> None:
                 elif mp_lobby_host:
                     if layl.row_mode.collidepoint(mx, my):
                         mp_mode_coop = not mp_mode_coop
+                        if not mp_mode_coop:
+                            mp_enemy_pressure = 0
                         send_host_config_if_online()
                         audio.play_positive()
                     elif layl.row_mission.collidepoint(mx, my):
@@ -5524,7 +5658,7 @@ def run() -> None:
                         mp_use_asteroids = not mp_use_asteroids
                         send_host_config_if_online()
                         audio.play_positive()
-                    elif layl.row_enemy.collidepoint(mx, my):
+                    elif mp_mode_coop and layl.row_enemy.collidepoint(mx, my):
                         mp_enemy_pressure = (mp_enemy_pressure + 1) % 4
                         send_host_config_if_online()
                         audio.play_positive()
@@ -5698,7 +5832,17 @@ def run() -> None:
                 if event.key == pygame.K_SPACE:
                     if post_combat_phase == "mp_lobby":
                         groups[:] = [g for g in groups if g.side == "player" and not g.dead]
-                        reset_player_spawn_positions(groups, crafts)
+                        _roster_lp = (
+                            normalize_mp_player_order(remote_relay_players)
+                            if (NET_MP and remote_lobby_id and remote_relay_players)
+                            else None
+                        )
+                        reset_mp_fleets_for_lobby(
+                            groups,
+                            crafts,
+                            mp_mode_coop=mp_mode_coop,
+                            roster_names=_roster_lp,
+                        )
                         for g in groups:
                             if g.side == "player" and g.class_name == "Carrier":
                                 clear_carrier_air_orders(g)
@@ -6908,63 +7052,185 @@ def run() -> None:
                 cam_x += sp
             cam_x, cam_y = clamp_camera(cam_x, cam_y)
 
-        if phase == "combat" and not outcome and not test_menu_open and not pause_menu_open:
-            now_ms_frame = pygame.time.get_ticks()
-            mp_fm_holder[0] = formation_mode
+        if phase == "combat" and not pause_menu_open:
+            if not outcome and not test_menu_open:
+                now_ms_frame = pygame.time.get_ticks()
+                mp_fm_holder[0] = formation_mode
 
-            if mp_net_combat_active() and mp_is_net_client():
-                if mp_pending_snap is not None:
-                    body = mp_pending_snap
-                    mp_pending_snap = None
-                    tsn = int(body.get("tick", -9))
-                    if tsn > mp_client_last_snap_tick:
-                        st = body.get("state")
-                        if isinstance(st, dict):
-                            hx = str(body.get("state_hash", ""))
-                            lh = hash_state_dict(st)
-                            if lh != hx:
-                                mp_desync_text = f"DESYNC hash tick={tsn}"
-                                mp_desync_until_ms = now_ms_frame + 8000
-                                print(f"[FleetRTS MP] {mp_desync_text} local={lh[:16]}… host={hx[:16]}…")
-                            (
-                                _t,
-                                snap_outcome,
-                                snap_phase,
-                                snap_ping_ms,
-                                snap_salvage,
-                                snap_score,
-                                snap_last_sg,
-                                snap_store_sel,
-                                snap_store_hov,
-                            ) = apply_snapshot_state(
-                                data=data,
+                if mp_receives_combat_snapshots():
+                    _mp_apply_pending_snapshot(now_ms_frame)
+                    now_death = now_ms_frame
+                    tts_last_player_cap_loss_tts, tts_last_enemy_kill_tts = apply_combat_death_audio(
+                        CombatAudioEvents(),
+                        audio,
+                        now_death,
+                        tts_last_player_cap_loss_tts=tts_last_player_cap_loss_tts,
+                        tts_last_enemy_kill_tts=tts_last_enemy_kill_tts,
+                        tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
+                        tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
+                    )
+                elif mp_net_combat_active() and mp_local_runs_authoritative_sim():
+                    ping_holder = [ping_ready_at_ms]
+                    for qcmd in mp_host_cmd_queue:
+                        apply_combat_command(
+                            data=data,
+                            groups=groups,
+                            crafts=crafts,
+                            mission=mission,
+                            formation_mode_holder=mp_fm_holder,
+                            active_pings=active_pings,
+                            sensor_ghosts=sensor_ghosts,
+                            ping_ghost_anchor_labels=ping_ghost_anchor_labels,
+                            mission_obstacles=mission.obstacles,
+                            cg_weapons_free=cg_weapons_free,
+                            control_groups=control_groups,
+                            ping_ready_at_ms_holder=ping_holder,
+                            now_ms=now_ms_frame,
+                            audio=audio,
+                            cmd={
+                                "kind": str(qcmd.get("kind", "")),
+                                "payload": dict(qcmd.get("payload") or {}),
+                                "sender": str(qcmd.get("_sender") or ""),
+                            },
+                        )
+                    mp_host_cmd_queue.clear()
+                    formation_mode = mp_fm_holder[0]
+                    ping_ready_at_ms = ping_holder[0]
+                    res = step_combat_frame(
+                        data=data,
+                        dt=dt,
+                        round_idx=round_idx,
+                        mission=mission,
+                        groups=groups,
+                        crafts=crafts,
+                        fog=fog,
+                        active_pings=active_pings,
+                        sensor_ghosts=sensor_ghosts,
+                        ping_ghost_anchor_labels=ping_ghost_anchor_labels,
+                        seeker_ghosts=seeker_ghosts,
+                        control_groups=control_groups,
+                        cg_weapons_free=cg_weapons_free,
+                        missiles=missiles,
+                        supplies=supplies,
+                        vfx_sparks=vfx_sparks,
+                        vfx_beams=vfx_beams,
+                        ballistics=ballistics,
+                        pd_rof_mult=pd_rof_mult,
+                        hooks=CombatSimHooks(on_player_hull_hit=on_player_hull_hit),
+                        phase=phase,
+                        outcome=outcome,
+                    )
+                    now_death = now_ms_frame
+                    tts_last_player_cap_loss_tts, tts_last_enemy_kill_tts = apply_combat_death_audio(
+                        res.death_audio,
+                        audio,
+                        now_death,
+                        tts_last_player_cap_loss_tts=tts_last_player_cap_loss_tts,
+                        tts_last_enemy_kill_tts=tts_last_enemy_kill_tts,
+                        tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
+                        tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
+                    )
+                    if res.flow:
+                        f = res.flow
+                        outcome = f.outcome
+                        phase = f.phase
+                        if f.phase == "debrief":
+                            run_total_score += f.run_total_score_add
+                            salvage[0] += f.salvage_gain
+                            last_salvage_gain = f.last_salvage_gain
+                            store_selected = f.store_selected
+                            store_hover = f.store_hover
+                    if now_ms_frame - mp_last_snap_send_ms >= 50:
+                        st = snapshot_state(
+                            tick=mp_combat_tick,
+                            round_idx=round_idx,
+                            mission=mission,
+                            groups=groups,
+                            crafts=crafts,
+                            missiles=missiles,
+                            ballistics=ballistics,
+                            vfx_sparks=vfx_sparks,
+                            vfx_beams=vfx_beams,
+                            supplies=supplies,
+                            pd_rof_mult=pd_rof_mult,
+                            cg_weapons_free=cg_weapons_free,
+                            control_groups=control_groups,
+                            fog=fog,
+                            active_pings=active_pings,
+                            sensor_ghosts=sensor_ghosts,
+                            seeker_ghosts=seeker_ghosts,
+                            ping_ghost_anchor_labels=ping_ghost_anchor_labels,
+                            ping_ready_at_ms=ping_ready_at_ms,
+                            outcome=outcome,
+                            phase=phase,
+                            salvage=float(salvage[0]),
+                            run_total_score=run_total_score,
+                            last_salvage_gain=last_salvage_gain,
+                            store_selected=store_selected,
+                            store_hover=store_hover,
+                        )
+                        h = hash_state_dict(st)
+                        mp_host_snap_tick = mp_combat_tick
+                        mp_relay.send_payload(
+                            combat_snap(
+                                tick=mp_combat_tick,
+                                snap_version=SNAP_VERSION,
+                                state_hash=h,
                                 state=st,
-                                mission=mission,
-                                groups=groups,
-                                crafts=crafts,
-                                missiles=missiles,
-                                ballistics=ballistics,
-                                vfx_sparks=vfx_sparks,
-                                vfx_beams=vfx_beams,
-                                supplies=supplies,
-                                pd_rof_mult=pd_rof_mult,
-                                cg_weapons_free=cg_weapons_free,
-                                control_groups=control_groups,
-                                fog=fog,
-                                active_pings=active_pings,
-                                sensor_ghosts=sensor_ghosts,
-                                seeker_ghosts=seeker_ghosts,
-                                ping_ghost_anchor_labels=ping_ghost_anchor_labels,
                             )
-                            ping_ready_at_ms = snap_ping_ms
-                            outcome = snap_outcome
-                            phase = snap_phase
-                            salvage[0] = int(snap_salvage)
-                            run_total_score = snap_score
-                            last_salvage_gain = snap_last_sg
-                            store_selected = snap_store_sel
-                            store_hover = snap_store_hov
-                            mp_client_last_snap_tick = tsn
+                        )
+                        mp_last_snap_send_ms = now_ms_frame
+                    mp_combat_tick += 1
+                else:
+                    res = step_combat_frame(
+                        data=data,
+                        dt=dt,
+                        round_idx=round_idx,
+                        mission=mission,
+                        groups=groups,
+                        crafts=crafts,
+                        fog=fog,
+                        active_pings=active_pings,
+                        sensor_ghosts=sensor_ghosts,
+                        ping_ghost_anchor_labels=ping_ghost_anchor_labels,
+                        seeker_ghosts=seeker_ghosts,
+                        control_groups=control_groups,
+                        cg_weapons_free=cg_weapons_free,
+                        missiles=missiles,
+                        supplies=supplies,
+                        vfx_sparks=vfx_sparks,
+                        vfx_beams=vfx_beams,
+                        ballistics=ballistics,
+                        pd_rof_mult=pd_rof_mult,
+                        hooks=CombatSimHooks(on_player_hull_hit=on_player_hull_hit),
+                        phase=phase,
+                        outcome=outcome,
+                    )
+                    now_death = pygame.time.get_ticks()
+                    tts_last_player_cap_loss_tts, tts_last_enemy_kill_tts = apply_combat_death_audio(
+                        res.death_audio,
+                        audio,
+                        now_death,
+                        tts_last_player_cap_loss_tts=tts_last_player_cap_loss_tts,
+                        tts_last_enemy_kill_tts=tts_last_enemy_kill_tts,
+                        tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
+                        tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
+                    )
+                    if res.flow:
+                        f = res.flow
+                        outcome = f.outcome
+                        phase = f.phase
+                        if f.phase == "debrief":
+                            run_total_score += f.run_total_score_add
+                            salvage[0] += f.salvage_gain
+                            last_salvage_gain = f.last_salvage_gain
+                            store_selected = f.store_selected
+                            store_hover = f.store_hover
+
+        elif phase == "debrief" and not test_menu_open and not pause_menu_open:
+            now_ms_frame = pygame.time.get_ticks()
+            if mp_receives_combat_snapshots():
+                _mp_apply_pending_snapshot(now_ms_frame)
                 now_death = now_ms_frame
                 tts_last_player_cap_loss_tts, tts_last_enemy_kill_tts = apply_combat_death_audio(
                     CombatAudioEvents(),
@@ -6975,77 +7241,7 @@ def run() -> None:
                     tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
                     tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
                 )
-            elif mp_net_combat_active() and mp_local_runs_authoritative_sim():
-                ping_holder = [ping_ready_at_ms]
-                for qcmd in mp_host_cmd_queue:
-                    apply_combat_command(
-                        data=data,
-                        groups=groups,
-                        crafts=crafts,
-                        mission=mission,
-                        formation_mode_holder=mp_fm_holder,
-                        active_pings=active_pings,
-                        sensor_ghosts=sensor_ghosts,
-                        ping_ghost_anchor_labels=ping_ghost_anchor_labels,
-                        mission_obstacles=mission.obstacles,
-                        cg_weapons_free=cg_weapons_free,
-                        control_groups=control_groups,
-                        ping_ready_at_ms_holder=ping_holder,
-                        now_ms=now_ms_frame,
-                        audio=audio,
-                        cmd={
-                            "kind": str(qcmd.get("kind", "")),
-                            "payload": dict(qcmd.get("payload") or {}),
-                            "sender": str(qcmd.get("_sender") or ""),
-                        },
-                    )
-                mp_host_cmd_queue.clear()
-                formation_mode = mp_fm_holder[0]
-                ping_ready_at_ms = ping_holder[0]
-                res = step_combat_frame(
-                    data=data,
-                    dt=dt,
-                    round_idx=round_idx,
-                    mission=mission,
-                    groups=groups,
-                    crafts=crafts,
-                    fog=fog,
-                    active_pings=active_pings,
-                    sensor_ghosts=sensor_ghosts,
-                    ping_ghost_anchor_labels=ping_ghost_anchor_labels,
-                    seeker_ghosts=seeker_ghosts,
-                    control_groups=control_groups,
-                    cg_weapons_free=cg_weapons_free,
-                    missiles=missiles,
-                    supplies=supplies,
-                    vfx_sparks=vfx_sparks,
-                    vfx_beams=vfx_beams,
-                    ballistics=ballistics,
-                    pd_rof_mult=pd_rof_mult,
-                    hooks=CombatSimHooks(on_player_hull_hit=on_player_hull_hit),
-                    phase=phase,
-                    outcome=outcome,
-                )
-                now_death = now_ms_frame
-                tts_last_player_cap_loss_tts, tts_last_enemy_kill_tts = apply_combat_death_audio(
-                    res.death_audio,
-                    audio,
-                    now_death,
-                    tts_last_player_cap_loss_tts=tts_last_player_cap_loss_tts,
-                    tts_last_enemy_kill_tts=tts_last_enemy_kill_tts,
-                    tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
-                    tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
-                )
-                if res.flow:
-                    f = res.flow
-                    outcome = f.outcome
-                    phase = f.phase
-                    if f.phase == "debrief":
-                        run_total_score += f.run_total_score_add
-                        salvage[0] += f.salvage_gain
-                        last_salvage_gain = f.last_salvage_gain
-                        store_selected = f.store_selected
-                        store_hover = f.store_hover
+            elif mp_snapshot_broadcast_authority():
                 if now_ms_frame - mp_last_snap_send_ms >= 50:
                     st = snapshot_state(
                         tick=mp_combat_tick,
@@ -7087,51 +7283,6 @@ def run() -> None:
                     )
                     mp_last_snap_send_ms = now_ms_frame
                 mp_combat_tick += 1
-            else:
-                res = step_combat_frame(
-                    data=data,
-                    dt=dt,
-                    round_idx=round_idx,
-                    mission=mission,
-                    groups=groups,
-                    crafts=crafts,
-                    fog=fog,
-                    active_pings=active_pings,
-                    sensor_ghosts=sensor_ghosts,
-                    ping_ghost_anchor_labels=ping_ghost_anchor_labels,
-                    seeker_ghosts=seeker_ghosts,
-                    control_groups=control_groups,
-                    cg_weapons_free=cg_weapons_free,
-                    missiles=missiles,
-                    supplies=supplies,
-                    vfx_sparks=vfx_sparks,
-                    vfx_beams=vfx_beams,
-                    ballistics=ballistics,
-                    pd_rof_mult=pd_rof_mult,
-                    hooks=CombatSimHooks(on_player_hull_hit=on_player_hull_hit),
-                    phase=phase,
-                    outcome=outcome,
-                )
-                now_death = pygame.time.get_ticks()
-                tts_last_player_cap_loss_tts, tts_last_enemy_kill_tts = apply_combat_death_audio(
-                    res.death_audio,
-                    audio,
-                    now_death,
-                    tts_last_player_cap_loss_tts=tts_last_player_cap_loss_tts,
-                    tts_last_enemy_kill_tts=tts_last_enemy_kill_tts,
-                    tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
-                    tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
-                )
-                if res.flow:
-                    f = res.flow
-                    outcome = f.outcome
-                    phase = f.phase
-                    if f.phase == "debrief":
-                        run_total_score += f.run_total_score_add
-                        salvage[0] += f.salvage_gain
-                        last_salvage_gain = f.last_salvage_gain
-                        store_selected = f.store_selected
-                        store_hover = f.store_hover
 
         if phase == "config":
             screen.fill((4, 12, 18))
@@ -7730,35 +7881,53 @@ def run() -> None:
             ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             ov.fill((6, 14, 24, 215))
             screen.blit(ov, (0, 0))
-            cap_n = player_capital_count(groups)
-            info_for = store_selected or store_hover
-            info_lines = debrief_info_lines(
-                info_for,
-                data,
-                groups,
-                crafts,
-                salvage,
-                supplies,
-                pd_rof_mult,
-                ciws_stacks,
-                bulk_stacks,
-                cap_n,
-            )
-            draw_debrief_store(
-                screen,
-                font,
-                font_tiny,
-                font_micro,
-                font_big,
-                round_idx,
-                run_total_score,
-                salvage,
-                last_salvage_gain,
-                store_selected,
-                store_hover,
-                cap_n,
-                info_lines,
-            )
+            if post_combat_phase == "mp_lobby" and bool(getattr(mission, "mp_pvp", False)):
+                lines_mp = [
+                    "PvP match ended",
+                    outcome or "",
+                    "",
+                    "SPACE — return to lobby for another match",
+                ]
+                y0 = HEIGHT // 2 - 120
+                for i, line in enumerate(lines_mp):
+                    if not line:
+                        y0 += 16
+                        continue
+                    fnt = font_big if i == 0 else font
+                    col = (230, 240, 250) if i == 0 else ((200, 220, 245) if i == 1 else (150, 175, 198))
+                    ts = fnt.render(line, True, col)
+                    screen.blit(ts, (WIDTH // 2 - ts.get_width() // 2, y0))
+                    y0 += 44 if fnt is font_big else 32
+            else:
+                cap_n = player_capital_count(groups)
+                info_for = store_selected or store_hover
+                info_lines = debrief_info_lines(
+                    info_for,
+                    data,
+                    groups,
+                    crafts,
+                    salvage,
+                    supplies,
+                    pd_rof_mult,
+                    ciws_stacks,
+                    bulk_stacks,
+                    cap_n,
+                )
+                draw_debrief_store(
+                    screen,
+                    font,
+                    font_tiny,
+                    font_micro,
+                    font_big,
+                    round_idx,
+                    run_total_score,
+                    salvage,
+                    last_salvage_gain,
+                    store_selected,
+                    store_hover,
+                    cap_n,
+                    info_lines,
+                )
         elif phase == "gameover":
             ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             ov.fill((18, 6, 10, 220))
@@ -7789,11 +7958,14 @@ def run() -> None:
                 hud_lines = ["ESC — pause for controls & help"]
         elif phase == "debrief":
             hud_lines = [outcome or ""]
-            if test_debrief_resume:
-                hud_lines.append("TEST: SPACE — back to battle (same round, enemies kept)")
-            hud_lines.append(
-                "Click row to select · ENTER / purchase bar to buy · 1–5 ships · 6–0 upgrades · SPACE next"
-            )
+            if post_combat_phase == "mp_lobby" and bool(getattr(mission, "mp_pvp", False)):
+                hud_lines.append("SPACE — return to multiplayer lobby")
+            else:
+                if test_debrief_resume:
+                    hud_lines.append("TEST: SPACE — back to battle (same round, enemies kept)")
+                hud_lines.append(
+                    "Click row to select · ENTER / purchase bar to buy · 1–5 ships · 6–0 upgrades · SPACE next"
+                )
         elif phase == "gameover":
             hud_lines = ["See center panel — [R] restart campaign"]
 

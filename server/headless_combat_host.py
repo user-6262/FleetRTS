@@ -362,6 +362,43 @@ def main() -> None:
             mp_combat_tick += 1
 
             if phase == "debrief":
+                st = snapshot_state(
+                    tick=mp_combat_tick,
+                    round_idx=int(cfg["round_idx"]),
+                    mission=mission,
+                    groups=groups,
+                    crafts=crafts,
+                    missiles=missiles,
+                    ballistics=ballistics,
+                    vfx_sparks=vfx_sparks,
+                    vfx_beams=vfx_beams,
+                    supplies=supplies,
+                    pd_rof_mult=pd_rof_mult,
+                    cg_weapons_free=cg_weapons_free,
+                    control_groups=control_groups,
+                    fog=fog,
+                    active_pings=active_pings,
+                    sensor_ghosts=sensor_ghosts,
+                    seeker_ghosts=seeker_ghosts,
+                    ping_ghost_anchor_labels=ping_ghost_anchor_labels,
+                    ping_ready_at_ms=ping_ready_at_ms,
+                    outcome=outcome,
+                    phase=phase,
+                    salvage=float(salvage[0]),
+                    run_total_score=run_total_score,
+                    last_salvage_gain=last_salvage_gain,
+                    store_selected=store_selected,
+                    store_hover=store_hover,
+                )
+                h = hash_state_dict(st)
+                relay.send_payload(
+                    combat_snap(
+                        tick=mp_combat_tick,
+                        snap_version=SNAP_VERSION,
+                        state_hash=h,
+                        state=st,
+                    )
+                )
                 combat_mode[0] = None
                 print("[FleetRTS sim] Match ended (debrief) — idle until next start_match.", flush=True)
                 break
