@@ -44,11 +44,25 @@ import pygame  # noqa: E402
 
 pygame.init()
 
-import demo_game as dg  # noqa: E402
+import combat as cb  # noqa: E402
 import mp_combat_bootstrap as mpboot  # noqa: E402
-from combat_mp import apply_combat_command  # noqa: E402
-from combat_sim import CombatSimHooks, apply_combat_death_audio, step_combat_frame  # noqa: E402
-from combat_snapshot import SNAP_VERSION, hash_state_dict, snapshot_state  # noqa: E402
+from combat import (  # noqa: E402
+    CONTROL_GROUP_SLOTS,
+    FORMATION_MODE_RING,
+    FogState,
+    SNAP_VERSION,
+    TTS_ENEMY_KILL_GAP_MS,
+    TTS_PLAYER_CAP_LOSS_GAP_MS,
+    CombatSimHooks,
+    all_player_capital_labels,
+    apply_combat_command,
+    apply_combat_death_audio,
+    combat_cmd_tick_allowed,
+    hash_state_dict,
+    load_game_data,
+    snapshot_state,
+    step_combat_frame,
+)
 from net.app_messages import lobby_presence, lobby_ready  # noqa: E402
 from net.combat_net import COMBAT_CMD, combat_snap  # noqa: E402
 from net.relay_client import RelayClient  # noqa: E402
@@ -123,7 +137,7 @@ def main() -> None:
     sim_hz = float(os.environ.get("FLEETRTS_SIM_HZ", "20"))
     step_dt = 1.0 / max(1.0, sim_hz)
 
-    data = dg.load_game_data()
+    data = load_game_data()
     audio = _NullAudio()
     relay = RelayClient(args.relay_host, args.relay_port, args.lobby_id.strip(), str(args.player_name)[:64])
     relay.connect()
@@ -159,15 +173,15 @@ def main() -> None:
     supplies = [100.0]
     salvage = [0]
     pd_rof_mult = [1.0]
-    fog = dg.FogState()
+    fog = FogState()
     active_pings: List[Any] = []
     sensor_ghosts: List[Any] = []
     seeker_ghosts: List[Any] = []
     ping_ghost_anchor_labels: Set[str] = set()
     ping_ready_at_ms = 0
-    control_groups: List[Any] = [None] * dg.CONTROL_GROUP_SLOTS
-    cg_weapons_free: List[bool] = [False] * dg.CONTROL_GROUP_SLOTS
-    mp_fm_holder = [dg.FORMATION_MODE_RING]
+    control_groups: List[Any] = [None] * CONTROL_GROUP_SLOTS
+    cg_weapons_free: List[bool] = [False] * CONTROL_GROUP_SLOTS
+    mp_fm_holder = [FORMATION_MODE_RING]
     cmd_queue: List[Dict[str, Any]] = []
     mp_combat_tick = 0
     last_snap_ms = 0
@@ -212,14 +226,14 @@ def main() -> None:
             supplies[0] = 100.0
             salvage[0] = 0
             pd_rof_mult[0] = 1.0
-            fog = dg.FogState()
+            fog = FogState()
             active_pings.clear()
             sensor_ghosts.clear()
             seeker_ghosts.clear()
             ping_ghost_anchor_labels.clear()
             ping_ready_at_ms = 0
-            control_groups[:] = [None] * dg.CONTROL_GROUP_SLOTS
-            cg_weapons_free[:] = [False] * dg.CONTROL_GROUP_SLOTS
+            control_groups[:] = [None] * CONTROL_GROUP_SLOTS
+            cg_weapons_free[:] = [False] * CONTROL_GROUP_SLOTS
             mission = mpboot.bootstrap_mp_combat_match(
                 data=data,
                 round_idx=int(cfg["round_idx"]),
@@ -231,7 +245,7 @@ def main() -> None:
                 player_setup=cfg.get("player_setup"),
                 mp_pvp=not bool(cfg.get("coop", True)),
             )
-            control_groups[0] = dg.all_player_capital_labels(groups)
+            control_groups[0] = all_player_capital_labels(groups)
             combat_mode[0] = "running"
             last_snap_ms = 0
             print("[FleetRTS sim] Match started — stepping combat.", flush=True)
@@ -252,6 +266,21 @@ def main() -> None:
             now_ms = pygame.time.get_ticks()
             ping_holder = [ping_ready_at_ms]
             for qcmd in cmd_queue:
+                cmd_in = {
+                    "kind": str(qcmd.get("kind", "")),
+                    "payload": dict(qcmd.get("payload") or {}),
+                    "sender": str(qcmd.get("_sender") or ""),
+                    "tick": int(qcmd.get("tick", 0)),
+                }
+                if not combat_cmd_tick_allowed(cmd_in, host_tick=mp_combat_tick):
+                    if os.environ.get("FLEETRTS_MP_CMD_TRACE"):
+                        print(
+                            f"[FleetRTS MP] drop cmd kind={cmd_in['kind']!r} "
+                            f"cmd_tick={cmd_in['tick']} host_tick={mp_combat_tick} "
+                            f"sender={cmd_in['sender']!r}",
+                            flush=True,
+                        )
+                    continue
                 apply_combat_command(
                     data=data,
                     groups=groups,
@@ -268,9 +297,9 @@ def main() -> None:
                     now_ms=now_ms,
                     audio=audio,
                     cmd={
-                        "kind": str(qcmd.get("kind", "")),
-                        "payload": dict(qcmd.get("payload") or {}),
-                        "sender": str(qcmd.get("_sender") or ""),
+                        "kind": cmd_in["kind"],
+                        "payload": cmd_in["payload"],
+                        "sender": cmd_in["sender"],
                     },
                 )
             cmd_queue.clear()
@@ -306,8 +335,8 @@ def main() -> None:
                 now_ms,
                 tts_last_player_cap_loss_tts=tts_pc,
                 tts_last_enemy_kill_tts=tts_ek,
-                tts_player_cap_loss_gap_ms=dg.TTS_PLAYER_CAP_LOSS_GAP_MS,
-                tts_enemy_kill_gap_ms=dg.TTS_ENEMY_KILL_GAP_MS,
+                tts_player_cap_loss_gap_ms=TTS_PLAYER_CAP_LOSS_GAP_MS,
+                tts_enemy_kill_gap_ms=TTS_ENEMY_KILL_GAP_MS,
             )
             if res.flow:
                 f = res.flow

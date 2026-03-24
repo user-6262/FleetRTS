@@ -27,7 +27,13 @@ def combat_cmd(
     kind: str,
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Player intent for the host to apply before stepping the sim."""
+    """Player intent for the host to apply before stepping the sim.
+
+    ``tick`` should be the last ``combat_snap`` tick the client applied (basis for
+    host-side validation in ``combat_mp.combat_cmd_tick_allowed``). Send ``0`` if
+    no snapshot has been applied yet; legacy clients that always sent ``0`` remain
+    compatible.
+    """
     return {
         "t": COMBAT_CMD,
         "tick": int(tick),

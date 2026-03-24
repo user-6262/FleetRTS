@@ -30,8 +30,40 @@ Practical direction
 -------------------
   - Prefer **parameters** (hooks, scenario struct, side lists) over new special cases.
   - Move **pure rules** into `combat_engine.py` / `combat_sim.py`; keep **I/O and
-    presentation** in `demo_game.py`.
+    presentation** in scene modules.
   - When adding MP, thread **commands in → state out** rather than duplicating combat
     logic on the client.
+
+Engine architecture (current)
+-----------------------------
+The monolithic `demo_game.run()` has been replaced by a scene-based engine:
+
+  - `engine.py`         — pygame init, main loop, SceneManager orchestration
+  - `draw.py`           — shared rendering primitives (ships, fog, UI chrome)
+  - `scenes.py`         — RunContext, Scene protocol, SceneManager
+  - `game_state.py`     — GameState dataclass tree (all mutable runtime state)
+
+Scene files (one per game phase):
+  - `scene_config.py`      — title / menu
+  - `scene_loadouts.py`    — fleet builder before combat
+  - `scene_combat.py`      — the core gameplay loop
+  - `scene_debrief.py`     — between-round store / upgrades
+  - `scene_gameover.py`    — end-of-run overlay
+  - `scene_mp_hub.py`      — multiplayer lobby browser
+  - `scene_mp_lobby.py`    — in-lobby settings, chat, ready/start
+  - `scene_bg_editor.py`   — battlegroup preset editor
+
+Combat simulation (unchanged):
+  - `combat_engine.py`     — movement, fog, spawning, engagement
+  - `combat_ordnance.py`   — weapons, PD, VFX
+  - `combat_sim.py`        — per-frame tick (`step_combat_frame`)
+  - `combat_mp.py`         — MP command application
+  - `combat_snapshot.py`   — state serialization for net sync
+  - `combat_constants.py`  — tuning values
+  - `combat_math.py`       — geometry helpers
+
+Entity types and utility functions still live in `demo_game.py` (retained as
+the data/entity library; its `run()` function is no longer the active entry
+point).
 
 This file is intent only; behavior is defined by code.
