@@ -34,12 +34,16 @@ def normalize_preset(raw: Dict[str, Any]) -> Optional[BattlegroupPreset]:
             cls = str(r.get("class_name") or "").strip()
             if not cls:
                 continue
-            rows.append(
-                {
-                    "class_name": cls,
-                    "label": str(r.get("label") or "").strip(),
-                }
-            )
+            row: Dict[str, Any] = {
+                "class_name": cls,
+                "label": str(r.get("label") or "").strip(),
+            }
+            if "hangar_loadout_choice" in r:
+                try:
+                    row["hangar_loadout_choice"] = int(r["hangar_loadout_choice"])
+                except (TypeError, ValueError):
+                    pass
+            rows.append(row)
     return BattlegroupPreset(
         preset_id=pid,
         name=name,

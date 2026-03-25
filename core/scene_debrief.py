@@ -116,7 +116,11 @@ def _next_label(groups: list, cls: str) -> str:
 
 
 def _attempt_purchase(item_id: str, gs: Any) -> bool:
-    from demo_game import make_group, spawn_hangar_crafts, ship_class_by_name
+    try:
+        from fleet_deployment import ship_class_by_name
+    except ImportError:
+        from core.fleet_deployment import ship_class_by_name
+    from demo_game import make_group, spawn_hangar_crafts
     salvage = gs.combat.salvage
     groups = gs.combat.groups
     crafts = gs.combat.crafts
@@ -264,6 +268,12 @@ class DebriefScene:
         gs.combat.mission = begin_combat_round(
             gs.data, gs.combat.groups, gs.round.round_idx,
             random.Random(seed), gs.battle_obstacles)
+        try:
+            from combat import reset_combat_control_groups_for_spawn
+        except ImportError:
+            from core.combat import reset_combat_control_groups_for_spawn
+        reset_combat_control_groups_for_spawn(
+            gs.combat.groups, gs.combat.control_groups, gs.combat.cg_weapons_free)
         from draw import clamp_camera, VIEW_W, VIEW_H
         caps = [g for g in gs.combat.groups
                 if g.side == "player" and not g.dead and g.render_capital]

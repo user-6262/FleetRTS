@@ -14,7 +14,7 @@ try:
 except ImportError:
     from core.combat_constants import FOG_CH, FOG_CW
 
-SNAP_VERSION = 2
+SNAP_VERSION = 3
 
 
 def _roundf(x: Any, nd: int = 5) -> Any:
@@ -190,6 +190,9 @@ def snapshot_state(
                 "pd_overheat_streak": _roundf(g.pd_overheat_streak, 6),
                 "engagement_timer": _roundf(g.engagement_timer, 6),
                 "attack_target": _attack_target_ref(g.attack_target, mission, missiles),
+                "strike_focus_target": _attack_target_ref(
+                    getattr(g, "strike_focus_target", None), mission, missiles
+                ),
                 "render_capital": bool(g.render_capital),
                 "hangar_loadout_choice": int(g.hangar_loadout_choice),
                 "weapons": _serialize_weapons(g.weapons),
@@ -684,10 +687,14 @@ def apply_snapshot_state(
 
     for g in groups:
         g.attack_target = None
+        g.strike_focus_target = None
     for gd in g_rows:
         g = label_group.get(gd["label"])
         if g:
             g.attack_target = _resolve_attack_target(gd.get("attack_target"), mission, label_group, label_craft, missiles)
+            g.strike_focus_target = _resolve_attack_target(
+                gd.get("strike_focus_target"), mission, label_group, label_craft, missiles
+            )
 
     active_pings.clear()
     for p in state.get("active_pings") or []:

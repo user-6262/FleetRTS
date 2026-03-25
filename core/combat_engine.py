@@ -149,7 +149,9 @@ def begin_combat_round(
     pods_required = 0
 
     if kind == "strike":
-        ox, oy = WORLD_W * 0.73, WORLD_H * 0.34
+        # Random relay position on the enemy side (deterministic from rng / round_seed).
+        ox = rng.uniform(WORLD_W * 0.58, WORLD_W * 0.82)
+        oy = rng.uniform(WORLD_H * 0.18, WORLD_H * 0.52)
         hp = 600.0 + float(round_idx) * 125.0
         objective = dg.GroundObjective(x=ox, y=oy, hp=hp, max_hp=hp)
         n_en = min(18, 4 + min(10, round_idx * 2) + n_en_boost)
@@ -163,7 +165,8 @@ def begin_combat_round(
             rad = 185.0 + (i % 4) * 54.0 + rng.uniform(-18, 18)
             add_enemy(rng.choice(pool), ox + math.cos(ang) * rad, oy + math.sin(ang) * rad * 0.88)
     else:
-        base_x, base_y = WORLD_W * 0.58, WORLD_H * 0.26
+        base_x = rng.uniform(WORLD_W * 0.48, WORLD_W * 0.68)
+        base_y = rng.uniform(WORLD_H * 0.18, WORLD_H * 0.36)
         n_pods = 3 + min(5, (round_idx + 1) // 2)
         for i in range(n_pods):
             pods.append(
@@ -365,6 +368,21 @@ def separate_player_capitals(groups: List[Any], dt: float, mp_pvp: bool = False)
 def rally_xy_for_craft(c: Any) -> Tuple[float, float]:
     p = c.parent
     wings = p.strike_rally_wings
+    # Bombers: strike wing focus beats stale wing/fleet rallies (capital attack_target is separate).
+    if getattr(c, "class_name", None) == "Bomber":
+        t = getattr(p, "strike_focus_target", None)
+        if t is not None and not getattr(t, "dead", False):
+            tx, ty = float(t.x), float(t.y)
+            px, py = float(p.x), float(p.y)
+            d_tp = dist_xy(tx, ty, px, py)
+            if d_tp > 1.0:
+                ux = (px - tx) / d_tp
+                uy = (py - ty) / d_tp
+            else:
+                ux, uy = 1.0, 0.0
+            mr = float(getattr(c, "max_range", 200.0))
+            standoff = max(72.0, min(mr * 0.82, d_tp * 0.95))
+            return tx + ux * standoff, ty + uy * standoff
     if c.squadron_index < len(wings) and wings[c.squadron_index] is not None:
         return wings[c.squadron_index]  # type: ignore[return-value]
     if p.strike_rally is not None:

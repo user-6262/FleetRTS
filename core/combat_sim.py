@@ -81,21 +81,22 @@ def apply_combat_death_audio(
     for _label, render_capital in events.player_caps_lost:
         audio.play_ship_destroyed()
         if render_capital and now_ms - pc >= tts_player_cap_loss_gap_ms:
-            audio.speak_voice("Capital ship lost.")
+            audio.speak_voice("capital_lost")
             pc = now_ms
     for _ in range(events.player_crafts_lost):
         audio.play_ship_destroyed()
     for _ in range(events.enemy_cap_losses):
         if now_ms - ek >= tts_enemy_kill_gap_ms:
-            audio.speak_voice("Enemy ship destroyed.")
+            audio.speak_voice("enemy_destroyed")
             ek = now_ms
     for _ in range(events.enemy_craft_losses):
         if now_ms - ek >= tts_enemy_kill_gap_ms:
-            audio.speak_voice("Enemy ship destroyed.")
+            audio.speak_voice("enemy_destroyed")
             ek = now_ms
     return pc, ek
 
 
+# If frame hitches persist, profile this function and draw.draw_battle_world (fog overlay is often costly).
 def step_combat_frame(
     *,
     data: dict,
@@ -240,7 +241,7 @@ def step_combat_frame(
             launcher_speed=c.speed,
             weapons_authorized=w_auth,
             player_damage_hook=hull_hit,
-            prefer_attack_target=c.parent.attack_target,
+            prefer_attack_target=getattr(c.parent, "strike_focus_target", None),
             obstacles=obs,
             fog=fog,
             launcher_owner=getattr(c, "owner_id", None),

@@ -252,6 +252,7 @@ class Group:
     pd_overheat_streak: float = 0.0
     engagement_timer: float = 0.0
     attack_target: Optional[Any] = None
+    strike_focus_target: Optional[Any] = None
     dead: bool = False
     hangar_loadout_choice: int = 0
 
@@ -267,6 +268,7 @@ class Group:
         self.move_pace_key = None
         self.attack_move = False
         self.attack_target = None
+        self.strike_focus_target = None
 
 
 @dataclass
@@ -849,6 +851,20 @@ def separate_player_capitals(groups: List[Any], dt: float, mp_pvp: bool = False)
 def rally_xy_for_craft(c: Any) -> Tuple[float, float]:
     p = c.parent
     wings = p.strike_rally_wings
+    if getattr(c, "class_name", None) == "Bomber":
+        t = getattr(p, "strike_focus_target", None)
+        if t is not None and not getattr(t, "dead", False):
+            tx, ty = float(t.x), float(t.y)
+            px, py = float(p.x), float(p.y)
+            d_tp = dist_xy(tx, ty, px, py)
+            if d_tp > 1.0:
+                ux = (px - tx) / d_tp
+                uy = (py - ty) / d_tp
+            else:
+                ux, uy = 1.0, 0.0
+            mr = float(getattr(c, "max_range", 200.0))
+            standoff = max(72.0, min(mr * 0.82, d_tp * 0.95))
+            return tx + ux * standoff, ty + uy * standoff
     if c.squadron_index < len(wings) and wings[c.squadron_index] is not None:
         return wings[c.squadron_index]  # type: ignore[return-value]
     if p.strike_rally is not None:
@@ -1053,13 +1069,21 @@ def prune_attack_targets(groups: List[Any], mission: Optional[Any] = None) -> No
     for g in groups:
         if g.side != "player":
             continue
+        oid = getattr(g, "owner_id", None)
         if not is_valid_attack_focus_for_side(
             "player",
             g.attack_target,
-            attacker_owner=getattr(g, "owner_id", None),
+            attacker_owner=oid,
             mp_pvp=pvp,
         ):
             g.attack_target = None
+        if not is_valid_attack_focus_for_side(
+            "player",
+            getattr(g, "strike_focus_target", None),
+            attacker_owner=oid,
+            mp_pvp=pvp,
+        ):
+            g.strike_focus_target = None
 
 
 def apply_damage(
@@ -1391,10 +1415,18 @@ def player_craft_may_fire_weapons(
     p = c.parent
     if p.attack_move:
         return True
+    oid = getattr(p, "owner_id", None)
     if is_valid_attack_focus_for_side(
         "player",
         p.attack_target,
-        attacker_owner=getattr(p, "owner_id", None),
+        attacker_owner=oid,
+        mp_pvp=mp_pvp,
+    ):
+        return True
+    if is_valid_attack_focus_for_side(
+        "player",
+        getattr(p, "strike_focus_target", None),
+        attacker_owner=oid,
         mp_pvp=mp_pvp,
     ):
         return True
@@ -2224,6 +2256,7 @@ def ensure_carrier_wing_rallies(data: dict, g: Group) -> None:
 
 def clear_carrier_air_orders(g: Group) -> None:
     g.strike_rally = None
+    g.strike_focus_target = None
     for i in range(len(g.strike_rally_wings)):
         g.strike_rally_wings[i] = None
 
@@ -2254,7 +2287,7 @@ def apply_fighter_wing_context_order(
         p.strike_rally = None
     if mark is not None:
         for p in parents.values():
-            p.attack_target = mark
+            p.strike_focus_target = mark
         for c in wing_f:
             si = c.squadron_index
             wings = c.parent.strike_rally_wings
@@ -2262,7 +2295,7 @@ def apply_fighter_wing_context_order(
                 wings[si] = None
     else:
         for p in parents.values():
-            p.attack_target = None
+            p.strike_focus_target = None
         for c in wing_f:
             si = c.squadron_index
             wings = c.parent.strike_rally_wings
@@ -2303,12 +2336,12 @@ def apply_fighter_strike_order(
         ensure_carrier_wing_rallies(data, g)
         g.strike_rally = None
         if mark is not None:
-            g.attack_target = mark
+            g.strike_focus_target = mark
             for i in fidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = None
         else:
-            g.attack_target = None
+            g.strike_focus_target = None
             for i in fidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = (wpx, wpy)
@@ -2336,7 +2369,7 @@ def apply_bomber_context_order(
             p.strike_rally = None
         if mark is not None:
             for p in parents.values():
-                p.attack_target = mark
+                p.strike_focus_target = mark
             for c in bom_wing:
                 si = c.squadron_index
                 wings = c.parent.strike_rally_wings
@@ -2344,7 +2377,7 @@ def apply_bomber_context_order(
                     wings[si] = None
         else:
             for p in parents.values():
-                p.attack_target = None
+                p.strike_focus_target = None
             for c in bom_wing:
                 si = c.squadron_index
                 wings = c.parent.strike_rally_wings
@@ -2363,12 +2396,12 @@ def apply_bomber_context_order(
         ensure_carrier_wing_rallies(data, g)
         g.strike_rally = None
         if mark is not None:
-            g.attack_target = mark
+            g.strike_focus_target = mark
             for i in bidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = None
         else:
-            g.attack_target = None
+            g.strike_focus_target = None
             for i in bidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = (wpx, wpy)
@@ -2543,6 +2576,7 @@ def issue_move_orders(selected: List[Group], mx: float, my: float, formation_mod
         if not g.dead:
             g.attack_move = False
             g.attack_target = None
+            g.strike_focus_target = None
     ordered = order_capitals_for_formation(selected, formation_mode)
     if not ordered:
         return False
@@ -2559,6 +2593,7 @@ def issue_line_move_orders(selected: List[Group], x0: float, y0: float, x1: floa
         if not g.dead:
             g.attack_move = False
             g.attack_target = None
+            g.strike_focus_target = None
     ordered = order_capitals_for_formation(selected, formation_mode)
     if not ordered:
         return False
@@ -2682,7 +2717,7 @@ def build_player_fleet_from_design(
     *,
     owner_id: str,
     color_id: int,
-    design_rows: Optional[List[Dict[str, str]]] = None,
+    design_rows: Optional[List[Dict[str, Any]]] = None,
     label_prefix: str = "",
     spawn_anchor: Optional[Tuple[float, float]] = None,
 ) -> Tuple[List[Group], List[Craft]]:
@@ -2691,26 +2726,31 @@ def build_player_fleet_from_design(
     ax, ay = spawn_anchor if spawn_anchor is not None else deploy_anchor_xy()
     groups: List[Group] = []
     for i, row in enumerate(design_rows):
-        cls = str((row or {}).get("class_name") or "").strip()
+        r = row or {}
+        cls = str(r.get("class_name") or "").strip()
         try:
-            ship_class_by_name(data, cls)
+            sc = ship_class_by_name(data, cls)
         except KeyError:
             continue
         px = ax - 320 + (i % 6) * 150.0
         py = ay + (i // 6) * 56.0
-        lbl = str((row or {}).get("label") or f"{RECRUIT_LABEL_PREFIX.get(cls, 'UN')}-{i+1}")
-        groups.append(
-            make_group(
-                data,
-                "player",
-                f"{label_prefix}{lbl}",
-                cls,
-                px,
-                py,
-                owner_id=owner_id,
-                color_id=color_id,
-            )
+        lbl = str(r.get("label") or f"{RECRUIT_LABEL_PREFIX.get(cls, 'UN')}-{i+1}")
+        g = make_group(
+            data,
+            "player",
+            f"{label_prefix}{lbl}",
+            cls,
+            px,
+            py,
+            owner_id=owner_id,
+            color_id=color_id,
         )
+        if sc.get("hangar") and r.get("hangar_loadout_choice") is not None:
+            try:
+                g.hangar_loadout_choice = int(r["hangar_loadout_choice"])
+            except (TypeError, ValueError):
+                pass
+        groups.append(g)
     if not groups:
         return build_initial_player_fleet(data, owner_id=owner_id, color_id=color_id, label_prefix=label_prefix)
     crafts: List[Craft] = []
@@ -3047,7 +3087,7 @@ def apply_combat_command(
 #  Snapshot serialization
 # ════════════════════════════════════════════════════════════════════════════
 
-SNAP_VERSION = 2
+SNAP_VERSION = 3
 
 
 def _roundf(x: Any, nd: int = 5) -> Any:
@@ -3218,6 +3258,9 @@ def snapshot_state(
                 "pd_overheat_streak": _roundf(g.pd_overheat_streak, 6),
                 "engagement_timer": _roundf(g.engagement_timer, 6),
                 "attack_target": _attack_target_ref(g.attack_target, mission, missiles),
+                "strike_focus_target": _attack_target_ref(
+                    getattr(g, "strike_focus_target", None), mission, missiles
+                ),
                 "render_capital": bool(g.render_capital),
                 "hangar_loadout_choice": int(g.hangar_loadout_choice),
                 "weapons": _serialize_weapons(g.weapons),
@@ -3710,10 +3753,14 @@ def apply_snapshot_state(
 
     for g in groups:
         g.attack_target = None
+        g.strike_focus_target = None
     for gd in g_rows:
         g = label_group.get(gd["label"])
         if g:
             g.attack_target = _resolve_attack_target(gd.get("attack_target"), mission, label_group, label_craft, missiles)
+            g.strike_focus_target = _resolve_attack_target(
+                gd.get("strike_focus_target"), mission, label_group, label_craft, missiles
+            )
 
     active_pings.clear()
     for p in state.get("active_pings") or []:
@@ -3816,17 +3863,17 @@ def apply_combat_death_audio(
     for _label, render_capital in events.player_caps_lost:
         audio.play_ship_destroyed()
         if render_capital and now_ms - pc >= tts_player_cap_loss_gap_ms:
-            audio.speak_voice("Capital ship lost.")
+            audio.speak_voice("capital_lost")
             pc = now_ms
     for _ in range(events.player_crafts_lost):
         audio.play_ship_destroyed()
     for _ in range(events.enemy_cap_losses):
         if now_ms - ek >= tts_enemy_kill_gap_ms:
-            audio.speak_voice("Enemy ship destroyed.")
+            audio.speak_voice("enemy_destroyed")
             ek = now_ms
     for _ in range(events.enemy_craft_losses):
         if now_ms - ek >= tts_enemy_kill_gap_ms:
-            audio.speak_voice("Enemy ship destroyed.")
+            audio.speak_voice("enemy_destroyed")
             ek = now_ms
     return pc, ek
 
@@ -3975,7 +4022,7 @@ def step_combat_frame(
             launcher_speed=c.speed,
             weapons_authorized=w_auth,
             player_damage_hook=hull_hit,
-            prefer_attack_target=c.parent.attack_target,
+            prefer_attack_target=getattr(c.parent, "strike_focus_target", None),
             obstacles=obs,
             fog=fog,
             launcher_owner=getattr(c, "owner_id", None),
@@ -4374,6 +4421,21 @@ def player_capital_count(groups: List[Group]) -> int:
 
 def all_player_capital_labels(groups: List[Group]) -> List[str]:
     return [g.label for g in groups if g.side == "player" and not g.dead and g.render_capital]
+
+
+def reset_combat_control_groups_for_spawn(
+    groups: List[Any],
+    control_groups: List[Optional[List[str]]],
+    cg_weapons_free: List[bool],
+) -> None:
+    """Slot 0 = all friendly capitals; weapons hold until a group member is damaged."""
+    for i in range(len(control_groups)):
+        control_groups[i] = None
+    for i in range(len(cg_weapons_free)):
+        cg_weapons_free[i] = False
+    labs = all_player_capital_labels(groups)  # type: ignore[arg-type]
+    if labs:
+        control_groups[0] = labs
 
 
 def next_recruit_label(groups: List[Group], class_name: str) -> str:

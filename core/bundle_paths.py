@@ -28,3 +28,10 @@ def assets_sound_dir() -> Path:
     if is_frozen():
         return _meipass() / "assets" / "sound"
     return _CORE_DIR.parent / "assets" / "sound"
+
+
+def assets_portraits_ships_dir() -> Path:
+    """Directory with ship portrait PNGs (e.g. faction_a_r0c0_Fighter.png)."""
+    if is_frozen():
+        return _meipass() / "assets" / "portraits" / "ships"
+    return _CORE_DIR.parent / "assets" / "portraits" / "ships"

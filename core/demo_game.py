@@ -104,6 +104,53 @@ except ImportError:
     )
 
 try:
+    from fleet_deployment import (
+        DEPLOYMENT_MIN_CAPITALS,
+        DEPLOYMENT_STARTING_SCRAP,
+        MAX_PLAYER_CAPITALS,
+        RECRUIT_LABEL_PREFIX,
+        apply_deployment_weapon_choice,
+        class_max_weapon_range,
+        deploy_anchor_xy,
+        deployment_cost_for_class,
+        group_max_range_from_weapons,
+        loadout_try_add_capital,
+        loadout_try_remove_capital,
+        next_recruit_label,
+        player_capital_count,
+        purge_loadout_choices_for_label,
+        recruit_spawn_xy,
+        resolve_weapon_entry,
+        ship_class_by_name,
+        sync_loadout_choice_map_for_group,
+        weapon_loadout_options_expanded,
+        weapon_loadout_slot_choices,
+    )
+except ImportError:
+    from core.fleet_deployment import (
+        DEPLOYMENT_MIN_CAPITALS,
+        DEPLOYMENT_STARTING_SCRAP,
+        MAX_PLAYER_CAPITALS,
+        RECRUIT_LABEL_PREFIX,
+        apply_deployment_weapon_choice,
+        class_max_weapon_range,
+        deploy_anchor_xy,
+        deployment_cost_for_class,
+        group_max_range_from_weapons,
+        loadout_try_add_capital,
+        loadout_try_remove_capital,
+        next_recruit_label,
+        player_capital_count,
+        purge_loadout_choices_for_label,
+        recruit_spawn_xy,
+        resolve_weapon_entry,
+        ship_class_by_name,
+        sync_loadout_choice_map_for_group,
+        weapon_loadout_options_expanded,
+        weapon_loadout_slot_choices,
+    )
+
+try:
     from combat_ordnance import (
         compute_pd_stress_ratio,
         control_group_slots_for_capital_label,
@@ -529,6 +576,7 @@ def ensure_carrier_wing_rallies(data: dict, g: Group) -> None:
 
 def clear_carrier_air_orders(g: Group) -> None:
     g.strike_rally = None
+    g.strike_focus_target = None
     for i in range(len(g.strike_rally_wings)):
         g.strike_rally_wings[i] = None
 
@@ -559,7 +607,7 @@ def apply_fighter_wing_context_order(
         p.strike_rally = None
     if mark is not None:
         for p in parents.values():
-            p.attack_target = mark
+            p.strike_focus_target = mark
         for c in wing_f:
             si = c.squadron_index
             wings = c.parent.strike_rally_wings
@@ -567,7 +615,7 @@ def apply_fighter_wing_context_order(
                 wings[si] = None
     else:
         for p in parents.values():
-            p.attack_target = None
+            p.strike_focus_target = None
         for c in wing_f:
             si = c.squadron_index
             wings = c.parent.strike_rally_wings
@@ -608,12 +656,12 @@ def apply_fighter_strike_order(
         ensure_carrier_wing_rallies(data, g)
         g.strike_rally = None
         if mark is not None:
-            g.attack_target = mark
+            g.strike_focus_target = mark
             for i in fidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = None
         else:
-            g.attack_target = None
+            g.strike_focus_target = None
             for i in fidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = (wpx, wpy)
@@ -641,7 +689,7 @@ def apply_bomber_context_order(
             p.strike_rally = None
         if mark is not None:
             for p in parents.values():
-                p.attack_target = mark
+                p.strike_focus_target = mark
             for c in bom_wing:
                 si = c.squadron_index
                 wings = c.parent.strike_rally_wings
@@ -649,7 +697,7 @@ def apply_bomber_context_order(
                     wings[si] = None
         else:
             for p in parents.values():
-                p.attack_target = None
+                p.strike_focus_target = None
             for c in bom_wing:
                 si = c.squadron_index
                 wings = c.parent.strike_rally_wings
@@ -668,12 +716,12 @@ def apply_bomber_context_order(
         ensure_carrier_wing_rallies(data, g)
         g.strike_rally = None
         if mark is not None:
-            g.attack_target = mark
+            g.strike_focus_target = mark
             for i in bidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = None
         else:
-            g.attack_target = None
+            g.strike_focus_target = None
             for i in bidx:
                 if i < len(g.strike_rally_wings):
                     g.strike_rally_wings[i] = (wpx, wpy)
@@ -881,9 +929,9 @@ TTS_ORDER_QUIP_GAP_MS = 2200
 # Per-ship label so switching between two damaged capitals still gets a report.
 TTS_LOW_HULL_SELECT_GAP_MS = 5200
 TTS_LOW_HULL_FRAC = 0.33
-TTS_MOVE_LINES = ("Moving.", "Orders received. Moving.")
-TTS_ATTACK_MOVE_LINES = ("Orders received. Striking.",)
-TTS_ATTACK_TARGET_LINES = ("Focus fire.",)
+TTS_MOVE_VOICE_LINES = ("moving", "orders_received_moving")
+TTS_ATTACK_MOVE_VOICE_LINES = ("orders_received_striking",)
+TTS_ATTACK_TARGET_VOICE_LINES = ("focus_fire",)
 DRAG_CLICK_MAX_PX = 6
 # 2.5D "altitude" (0 = combat plane, higher = further from plane — smaller / lifted on screen)
 Z_VIS_LIFT = 0.36
@@ -904,10 +952,6 @@ MAX_CIWS_STACKS = 5
 MAX_BULKHEAD_STACKS = 5
 CIWS_ROF_BONUS = 0.085
 BULKHEAD_HP_FRAC = 0.06
-MAX_PLAYER_CAPITALS = 14
-# Pre-mission fleet designer (loadout screen): scrap pool for hulls + weapon swaps.
-DEPLOYMENT_STARTING_SCRAP = 420
-DEPLOYMENT_MIN_CAPITALS = 1
 COST_FRIGATE = 62
 COST_DESTROYER = 92
 COST_CRUISER = 138
@@ -915,13 +959,6 @@ COST_BATTLESHIP = 175
 COST_CARRIER = 255
 COST_LIGHT_RESUPPLY = 22
 LIGHT_RESUPPLY_AMT = 14.0
-RECRUIT_LABEL_PREFIX = {
-    "Frigate": "FF",
-    "Destroyer": "DD",
-    "Cruiser": "CG",
-    "Battleship": "BB",
-    "Carrier": "CV",
-}
 # Debrief store layout (three panels)
 DEBRIEF_MARGIN = 14
 DEBRIEF_TOP = 72
@@ -966,201 +1003,12 @@ def load_game_data() -> dict:
         return json.load(f)
 
 
-def ship_class_by_name(data: dict, name: str) -> dict:
-    for sc in data["ship_classes"]:
-        if sc["name"] == name:
-            return sc
-    raise KeyError(name)
-
-
 def capital_ship_class_names(data: dict) -> List[str]:
     out: List[str] = []
     for sc in data.get("ship_classes") or []:
         if sc.get("render") == "capital" and sc.get("name"):
             out.append(str(sc["name"]))
     return sorted(out)
-
-
-def weapon_loadout_slot_choices(data: dict, slot: dict) -> List[dict]:
-    """Inline choices or a named choice_set from data['weapon_loadout_choice_sets']."""
-    cset = slot.get("choice_set")
-    if cset:
-        sets = data.get("weapon_loadout_choice_sets") or {}
-        row = sets.get(str(cset))
-        if row is None:
-            raise KeyError(f"weapon_loadout_choice_sets[{cset!r}] missing")
-        return [dict(x) for x in row]
-    return [dict(x) for x in (slot.get("choices") or [])]
-
-
-def weapon_loadout_options_expanded(data: dict, sc: dict) -> List[dict]:
-    out: List[dict] = []
-    for slot in sc.get("weapon_loadout_options") or []:
-        e = dict(slot)
-        e["choices"] = weapon_loadout_slot_choices(data, slot)
-        out.append(e)
-    return out
-
-
-def resolve_weapon_entry(data: dict, entry: dict) -> Tuple[str, str, float]:
-    """Ship weapon dict or loadout choice: inline stats or module_id lookup."""
-    if "module_id" in entry:
-        mid = str(entry["module_id"])
-        mods = data.get("weapon_modules") or {}
-        if mid not in mods:
-            raise KeyError(f"weapon_modules[{mid!r}] missing")
-        m = mods[mid]
-        return str(m["name"]), str(m["projectile"]), float(m["fire_rate"])
-    return str(entry["name"]), str(entry["projectile"]), float(entry["fire_rate"])
-
-
-def sync_loadout_choice_map_for_group(
-    data: dict, g: Group, choice_map: Dict[Tuple[str, int], int]
-) -> None:
-    """Align per-row choice indices with the group's current weapons (shared choice_sets, etc.)."""
-    sc = ship_class_by_name(data, g.class_name)
-    opts = weapon_loadout_options_expanded(data, sc)
-    for si, slot in enumerate(opts):
-        wi = int(slot["weapon_index"])
-        if wi < 0 or wi >= len(g.weapons):
-            continue
-        rw = g.weapons[wi]
-        choices = slot["choices"]
-        best_i = 0
-        for ci, ch in enumerate(choices):
-            name, pn, fr = resolve_weapon_entry(data, ch)
-            if (
-                pn == rw.projectile_name
-                and abs(fr - rw.fire_rate) < 1e-4
-                and name == rw.name
-            ):
-                best_i = ci
-                break
-        else:
-            for ci, ch in enumerate(choices):
-                name, pn, fr = resolve_weapon_entry(data, ch)
-                if pn == rw.projectile_name and abs(fr - rw.fire_rate) < 1e-4:
-                    best_i = ci
-                    break
-        choice_map[(g.label, si)] = best_i
-
-
-def class_max_weapon_range(data: dict, sc: dict) -> float:
-    weapons = sc.get("weapons") or []
-    if not weapons:
-        return 120.0
-    return max(
-        weapon_range(data, {"projectile": pn, "fire_rate": fr})
-        for _, pn, fr in (resolve_weapon_entry(data, w) for w in weapons)
-    )
-
-
-def group_max_range_from_weapons(data: dict, weapons: List[RuntimeWeapon]) -> float:
-    if not weapons:
-        return 120.0
-    return max(weapon_range(data, {"projectile": w.projectile_name}) for w in weapons)
-
-
-def deployment_cost_for_class(data: dict, class_name: str) -> int:
-    sc = ship_class_by_name(data, class_name)
-    v = sc.get("deployment_cost")
-    if v is not None:
-        return int(v)
-    if sc.get("render") == "capital":
-        return 72
-    return 0
-
-
-def purge_loadout_choices_for_label(choice_map: Dict[Tuple[str, int], int], label: str) -> None:
-    for k in list(choice_map.keys()):
-        if k[0] == label:
-            del choice_map[k]
-
-
-def apply_deployment_weapon_choice(
-    data: dict,
-    g: Group,
-    loadout_slot_i: int,
-    new_choice_i: int,
-    choice_map: Dict[Tuple[str, int], int],
-    deployment_scrap: List[int],
-) -> bool:
-    sc = ship_class_by_name(data, g.class_name)
-    opts = weapon_loadout_options_expanded(data, sc)
-    if loadout_slot_i < 0 or loadout_slot_i >= len(opts):
-        return False
-    slot = opts[loadout_slot_i]
-    choices = slot["choices"]
-    if new_choice_i < 0 or new_choice_i >= len(choices):
-        return False
-    key = (g.label, loadout_slot_i)
-    cur_i = choice_map.get(key, 0)
-    if new_choice_i == cur_i:
-        return True
-    old_c = int(choices[cur_i].get("scrap_cost", 0))
-    new_c = int(choices[new_choice_i].get("scrap_cost", 0))
-    net_scrap = new_c - old_c
-    if net_scrap > 0 and deployment_scrap[0] < net_scrap:
-        return False
-    wi = int(slot["weapon_index"])
-    if wi < 0 or wi >= len(g.weapons):
-        return False
-    deployment_scrap[0] -= net_scrap
-    choice_map[key] = new_choice_i
-    ch = choices[new_choice_i]
-    wn, pn, fr = resolve_weapon_entry(data, ch)
-    g.weapons[wi] = RuntimeWeapon(
-        name=wn,
-        projectile_name=pn,
-        fire_rate=float(fr),
-        cooldown=0.0,
-    )
-    g.max_range = group_max_range_from_weapons(data, g.weapons)
-    return True
-
-
-def loadout_try_add_capital(
-    data: dict,
-    preview_groups: List[Group],
-    preview_crafts: List[Craft],
-    class_name: str,
-    deployment_scrap: List[int],
-    choice_map: Dict[Tuple[str, int], int],
-) -> bool:
-    if player_capital_count(preview_groups) >= MAX_PLAYER_CAPITALS:
-        return False
-    cost = deployment_cost_for_class(data, class_name)
-    if deployment_scrap[0] < cost:
-        return False
-    deployment_scrap[0] -= cost
-    recruit_player_capital(
-        data,
-        preview_groups,
-        preview_crafts,
-        class_name,
-        control_groups=None,
-        loadout_choice_map=choice_map,
-    )
-    return True
-
-
-def loadout_try_remove_capital(
-    data: dict,
-    preview_groups: List[Group],
-    preview_crafts: List[Craft],
-    g: Group,
-    deployment_scrap: List[int],
-    choice_map: Dict[Tuple[str, int], int],
-) -> bool:
-    if player_capital_count(preview_groups) <= DEPLOYMENT_MIN_CAPITALS:
-        return False
-    if g not in preview_groups:
-        return False
-    deployment_scrap[0] += deployment_cost_for_class(data, g.class_name)
-    purge_loadout_choices_for_label(choice_map, g.label)
-    preview_groups[:] = [x for x in preview_groups if x is not g]
-    preview_crafts[:] = [c for c in preview_crafts if c.parent is not g]
-    return True
 
 
 @dataclass
@@ -1204,6 +1052,7 @@ class Group:
     pd_overheat_streak: float = 0.0
     engagement_timer: float = 0.0
     attack_target: Optional[Any] = None
+    strike_focus_target: Optional[Any] = None
     dead: bool = False
     hangar_loadout_choice: int = 0
 
@@ -1219,6 +1068,7 @@ class Group:
         self.move_pace_key = None
         self.attack_move = False
         self.attack_target = None
+        self.strike_focus_target = None
 
 
 @dataclass
@@ -1506,10 +1356,6 @@ def draw_extract_zone(surf: pygame.Surface, font: pygame.font.Font, cam_x: float
     surf.blit(lbl, (tcx - lbl.get_width() // 2, tcy - 18))
 
 
-def deploy_anchor_xy() -> Tuple[float, float]:
-    return WORLD_W * 0.5, WORLD_H * 0.86
-
-
 def initial_camera_for_fleet(groups: List[Group]) -> Tuple[float, float]:
     caps = [g for g in groups if g.side == "player" and not g.dead and g.render_capital]
     if not caps:
@@ -1698,6 +1544,7 @@ def issue_move_orders(selected: List[Group], mx: float, my: float, formation_mod
         if not g.dead:
             g.attack_move = False
             g.attack_target = None
+            g.strike_focus_target = None
     ordered = order_capitals_for_formation(selected, formation_mode)
     if not ordered:
         return False
@@ -1714,6 +1561,7 @@ def issue_line_move_orders(selected: List[Group], x0: float, y0: float, x1: floa
         if not g.dead:
             g.attack_move = False
             g.attack_target = None
+            g.strike_focus_target = None
     ordered = order_capitals_for_formation(selected, formation_mode)
     if not ordered:
         return False
@@ -1751,19 +1599,19 @@ def issue_attack_line_move_orders(
 
 
 def tts_speak_random_if_cooled(
-    audio: GameAudio, lines: Tuple[str, ...], now_ms: int, last_ms: int, gap_ms: int
+    audio: GameAudio, line_ids: Tuple[str, ...], now_ms: int, last_ms: int, gap_ms: int
 ) -> int:
-    if not lines or now_ms - last_ms < gap_ms:
+    if not line_ids or now_ms - last_ms < gap_ms:
         return last_ms
-    audio.speak_voice(random.choice(lines))
+    audio.speak_voice(random.choice(line_ids))
     return now_ms
 
 
-def tts_speak_if_cooled(audio: GameAudio, text: str, now_ms: int, last_ms: int, gap_ms: int) -> int:
-    t = text.strip()
-    if not t or now_ms - last_ms < gap_ms:
+def tts_speak_if_cooled(audio: GameAudio, line_id: str, now_ms: int, last_ms: int, gap_ms: int) -> int:
+    lid = line_id.strip()
+    if not lid or now_ms - last_ms < gap_ms:
         return last_ms
-    audio.speak_voice(t)
+    audio.speak_voice(lid)
     return now_ms
 
 
@@ -2288,7 +2136,7 @@ def build_player_fleet_from_design(
     *,
     owner_id: str,
     color_id: int,
-    design_rows: Optional[List[Dict[str, str]]] = None,
+    design_rows: Optional[List[Dict[str, Any]]] = None,
     label_prefix: str = "",
     spawn_anchor: Optional[Tuple[float, float]] = None,
 ) -> Tuple[List[Group], List[Craft]]:
@@ -2297,26 +2145,31 @@ def build_player_fleet_from_design(
     ax, ay = spawn_anchor if spawn_anchor is not None else deploy_anchor_xy()
     groups: List[Group] = []
     for i, row in enumerate(design_rows):
-        cls = str((row or {}).get("class_name") or "").strip()
+        r = row or {}
+        cls = str(r.get("class_name") or "").strip()
         try:
-            ship_class_by_name(data, cls)
+            sc = ship_class_by_name(data, cls)
         except KeyError:
             continue
         px = ax - 320 + (i % 6) * 150.0
         py = ay + (i // 6) * 56.0
-        lbl = str((row or {}).get("label") or f"{RECRUIT_LABEL_PREFIX.get(cls, 'UN')}-{i+1}")
-        groups.append(
-            make_group(
-                data,
-                "player",
-                f"{label_prefix}{lbl}",
-                cls,
-                px,
-                py,
-                owner_id=owner_id,
-                color_id=color_id,
-            )
+        lbl = str(r.get("label") or f"{RECRUIT_LABEL_PREFIX.get(cls, 'UN')}-{i+1}")
+        g = make_group(
+            data,
+            "player",
+            f"{label_prefix}{lbl}",
+            cls,
+            px,
+            py,
+            owner_id=owner_id,
+            color_id=color_id,
         )
+        if sc.get("hangar") and r.get("hangar_loadout_choice") is not None:
+            try:
+                g.hangar_loadout_choice = int(r["hangar_loadout_choice"])
+            except (TypeError, ValueError):
+                pass
+        groups.append(g)
     if not groups:
         return build_initial_player_fleet(data, owner_id=owner_id, color_id=color_id, label_prefix=label_prefix)
     crafts: List[Craft] = []
@@ -2385,35 +2238,8 @@ def reset_mp_fleets_for_lobby(
     snap_strike_crafts_to_carriers(crafts)
 
 
-def player_capital_count(groups: List[Group]) -> int:
-    return sum(1 for g in groups if g.side == "player" and not g.dead and g.render_capital)
-
-
 def all_player_capital_labels(groups: List[Group]) -> List[str]:
     return [g.label for g in groups if g.side == "player" and not g.dead and g.render_capital]
-
-
-def next_recruit_label(groups: List[Group], class_name: str) -> str:
-    prefix = RECRUIT_LABEL_PREFIX[class_name]
-    nums: List[int] = []
-    for g in groups:
-        if g.side != "player" or g.class_name != class_name:
-            continue
-        if g.label.startswith(prefix + "-"):
-            try:
-                nums.append(int(g.label.split("-", 1)[1]))
-            except ValueError:
-                pass
-    n = max(nums) + 1 if nums else 1
-    return f"{prefix}-{n}"
-
-
-def recruit_spawn_xy(groups: List[Group]) -> Tuple[float, float]:
-    ax, ay = deploy_anchor_xy()
-    n = sum(1 for g in groups if g.side == "player" and not g.dead and g.render_capital)
-    x = ax - 420 + (n % 6) * 150.0
-    y = ay + 36 + (n // 6) * 48.0
-    return x, y
 
 
 def recruit_player_capital(
@@ -5182,7 +5008,7 @@ def run() -> None:
                     enter_ship_loadouts()
                     audio.play_positive()
                 elif event.key == pygame.K_F8:
-                    audio.speak_voice("Voice link test.")
+                    audio.speak_voice("voice_link_test")
                 elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                     audio.master_volume = max(0.0, audio.master_volume - 0.05)
                     audio.apply_master_volume()
@@ -6085,7 +5911,13 @@ def run() -> None:
                         ]
                         fight_w = any(c.class_name in ("Fighter", "Interceptor") for c in wing_sel)
                         bomb_w = any(c.class_name == "Bomber" for c in wing_sel)
-                        if fight_w:
+                        if fight_w and bomb_w:
+                            awaiting_fighter_order_click = True
+                            awaiting_bomber_order_click = True
+                            awaiting_capital_context_lmb = False
+                            awaiting_attack_move_click = False
+                            awaiting_attack_target_click = False
+                        elif fight_w:
                             awaiting_fighter_order_click = True
                             awaiting_bomber_order_click = False
                             awaiting_capital_context_lmb = False
@@ -6166,7 +5998,7 @@ def run() -> None:
                         awaiting_bomber_order_click = False
                         awaiting_capital_context_lmb = False
                     elif event.key == pygame.K_F8:
-                        audio.speak_voice("Voice link test.")
+                        audio.speak_voice("voice_link_test")
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     mx, my = to_internal(event.pos)
                     if my >= VIEW_H:
@@ -6266,7 +6098,14 @@ def run() -> None:
                                                 c.class_name in ("Fighter", "Interceptor") for c in wsel
                                             )
                                             bomb_ws = any(c.class_name == "Bomber" for c in wsel)
-                                            if fight_ws:
+                                            if fight_ws and bomb_ws:
+                                                awaiting_fighter_order_click = True
+                                                awaiting_bomber_order_click = True
+                                                awaiting_capital_context_lmb = False
+                                                awaiting_attack_move_click = False
+                                                awaiting_attack_target_click = False
+                                                audio.play_positive()
+                                            elif fight_ws:
                                                 awaiting_fighter_order_click = True
                                                 awaiting_bomber_order_click = False
                                                 awaiting_capital_context_lmb = False
@@ -6437,13 +6276,14 @@ def run() -> None:
                                         )
                                         tts_last_order_quip_tts = tts_speak_if_cooled(
                                             audio,
-                                            "Bombers acknowledge.",
+                                            "bombers_acknowledge",
                                             now_rmb,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
                                         )
                                         audio.play_positive()
                                     awaiting_bomber_order_click = False
+                                    awaiting_fighter_order_click = False
                                     awaiting_capital_context_lmb = False
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
@@ -6465,13 +6305,14 @@ def run() -> None:
                                         data, crafts, sel, wpx, wpy, mark
                                     )
                                     awaiting_bomber_order_click = False
+                                    awaiting_fighter_order_click = False
                                     awaiting_capital_context_lmb = False
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
                                     if ok:
                                         tts_last_order_quip_tts = tts_speak_if_cooled(
                                             audio,
-                                            "Bombers acknowledge.",
+                                            "bombers_acknowledge",
                                             now_rmb,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
@@ -6481,6 +6322,7 @@ def run() -> None:
                                         audio.play_negative()
                                 else:
                                     awaiting_bomber_order_click = False
+                                    awaiting_fighter_order_click = False
                                     awaiting_capital_context_lmb = False
                             elif awaiting_fighter_order_click and my < VIEW_H:
                                 eligible = any(g.class_name == "Carrier" for g in sel) or any(
@@ -6501,13 +6343,14 @@ def run() -> None:
                                         )
                                         tts_last_order_quip_tts = tts_speak_if_cooled(
                                             audio,
-                                            "Fighters acknowledge.",
+                                            "fighters_acknowledge",
                                             now_rmb,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
                                         )
                                         audio.play_positive()
                                     awaiting_fighter_order_click = False
+                                    awaiting_bomber_order_click = False
                                     awaiting_capital_context_lmb = False
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
@@ -6529,13 +6372,14 @@ def run() -> None:
                                         data, crafts, sel, wpx, wpy, mark
                                     )
                                     awaiting_fighter_order_click = False
+                                    awaiting_bomber_order_click = False
                                     awaiting_capital_context_lmb = False
                                     awaiting_attack_move_click = False
                                     awaiting_attack_target_click = False
                                     if ok:
                                         tts_last_order_quip_tts = tts_speak_if_cooled(
                                             audio,
-                                            "Fighters acknowledge.",
+                                            "fighters_acknowledge",
                                             now_rmb,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
@@ -6545,6 +6389,7 @@ def run() -> None:
                                         audio.play_negative()
                                 else:
                                     awaiting_fighter_order_click = False
+                                    awaiting_bomber_order_click = False
                                     awaiting_capital_context_lmb = False
                             elif my < VIEW_H and sel_caps:
                                 if mp_is_net_client():
@@ -6587,7 +6432,7 @@ def run() -> None:
                                         awaiting_attack_target_click = False
                                         tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                             audio,
-                                            TTS_ATTACK_TARGET_LINES,
+                                            TTS_ATTACK_TARGET_VOICE_LINES,
                                             now_rmb,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
@@ -6597,7 +6442,7 @@ def run() -> None:
                                         if issue_move_orders(sel, wpx, wpy, formation_mode):
                                             tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                                 audio,
-                                                TTS_MOVE_LINES,
+                                                TTS_MOVE_VOICE_LINES,
                                                 now_rmb,
                                                 tts_last_order_quip_tts,
                                                 TTS_ORDER_QUIP_GAP_MS,
@@ -6619,7 +6464,7 @@ def run() -> None:
                                     )
                                     tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                         audio,
-                                        TTS_MOVE_LINES,
+                                        TTS_MOVE_VOICE_LINES,
                                         now_rmb,
                                         tts_last_order_quip_tts,
                                         TTS_ORDER_QUIP_GAP_MS,
@@ -6627,7 +6472,7 @@ def run() -> None:
                                 elif issue_move_orders(sel, wpx, wpy, formation_mode):
                                     tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                         audio,
-                                        TTS_MOVE_LINES,
+                                        TTS_MOVE_VOICE_LINES,
                                         now_rmb,
                                         tts_last_order_quip_tts,
                                         TTS_ORDER_QUIP_GAP_MS,
@@ -6675,7 +6520,7 @@ def run() -> None:
                                             )
                                             tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                                 audio,
-                                                TTS_ATTACK_TARGET_LINES,
+                                                TTS_ATTACK_TARGET_VOICE_LINES,
                                                 now_ord,
                                                 tts_last_order_quip_tts,
                                                 TTS_ORDER_QUIP_GAP_MS,
@@ -6711,7 +6556,7 @@ def run() -> None:
                                             if ok_set:
                                                 tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                                     audio,
-                                                    TTS_ATTACK_TARGET_LINES,
+                                                    TTS_ATTACK_TARGET_VOICE_LINES,
                                                     now_ord,
                                                     tts_last_order_quip_tts,
                                                     TTS_ORDER_QUIP_GAP_MS,
@@ -6742,7 +6587,7 @@ def run() -> None:
                                             )
                                             tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                                 audio,
-                                                TTS_ATTACK_MOVE_LINES,
+                                                TTS_ATTACK_MOVE_VOICE_LINES,
                                                 now_ord,
                                                 tts_last_order_quip_tts,
                                                 TTS_ORDER_QUIP_GAP_MS,
@@ -6750,7 +6595,7 @@ def run() -> None:
                                         elif issue_attack_move_orders(sel_caps, wpx, wpy, formation_mode):
                                             tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                                 audio,
-                                                TTS_ATTACK_MOVE_LINES,
+                                                TTS_ATTACK_MOVE_VOICE_LINES,
                                                 now_ord,
                                                 tts_last_order_quip_tts,
                                                 TTS_ORDER_QUIP_GAP_MS,
@@ -6828,7 +6673,7 @@ def run() -> None:
                                         awaiting_attack_target_click = False
                                         tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                             audio,
-                                            TTS_ATTACK_TARGET_LINES,
+                                            TTS_ATTACK_TARGET_VOICE_LINES,
                                             now_ord,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
@@ -6841,7 +6686,7 @@ def run() -> None:
                                         awaiting_attack_target_click = False
                                         tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                             audio,
-                                            TTS_MOVE_LINES,
+                                            TTS_MOVE_VOICE_LINES,
                                             now_ord,
                                             tts_last_order_quip_tts,
                                             TTS_ORDER_QUIP_GAP_MS,
@@ -6892,7 +6737,7 @@ def run() -> None:
                                     )
                                     tts_last_order_quip_tts = tts_speak_if_cooled(
                                         audio,
-                                        "Fighters acknowledge.",
+                                        "fighters_acknowledge",
                                         now_ord,
                                         tts_last_order_quip_tts,
                                         TTS_ORDER_QUIP_GAP_MS,
@@ -6903,7 +6748,7 @@ def run() -> None:
                                 ):
                                     tts_last_order_quip_tts = tts_speak_if_cooled(
                                         audio,
-                                        "Fighters acknowledge.",
+                                        "fighters_acknowledge",
                                         now_ord,
                                         tts_last_order_quip_tts,
                                         TTS_ORDER_QUIP_GAP_MS,
@@ -6912,6 +6757,7 @@ def run() -> None:
                                 else:
                                     audio.play_negative()
                                 awaiting_fighter_order_click = False
+                                awaiting_bomber_order_click = False
                                 mouse_done = True
 
                             if not mouse_done and shift_down and drag >= DRAG_LINE_MIN_PX and len(sel_caps) >= 1:
@@ -6933,7 +6779,7 @@ def run() -> None:
                                     )
                                     tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                         audio,
-                                        TTS_MOVE_LINES,
+                                        TTS_MOVE_VOICE_LINES,
                                         now_ord,
                                         tts_last_order_quip_tts,
                                         TTS_ORDER_QUIP_GAP_MS,
@@ -6941,7 +6787,7 @@ def run() -> None:
                                 elif issue_line_move_orders(sel_caps, wx0, wy0, wx1, wy1, formation_mode):
                                     tts_last_order_quip_tts = tts_speak_random_if_cooled(
                                         audio,
-                                        TTS_MOVE_LINES,
+                                        TTS_MOVE_VOICE_LINES,
                                         now_ord,
                                         tts_last_order_quip_tts,
                                         TTS_ORDER_QUIP_GAP_MS,
@@ -7028,14 +6874,11 @@ def run() -> None:
                     if hull_frac < TTS_LOW_HULL_FRAC:
                         prev_lh = tts_last_low_hull_by_label.get(g0.label, -10**9)
                         if now_sel - prev_lh >= TTS_LOW_HULL_SELECT_GAP_MS:
-                            pct = max(0, min(100, int(round(hull_frac * 100))))
-                            audio.speak_voice(
-                                f"Commander, hull integrity at {pct} percent. Awaiting orders."
-                            )
+                            audio.speak_voice("hull_integrity_low")
                             tts_last_low_hull_by_label[g0.label] = now_sel
                     elif g0.class_name == "Carrier":
                         if now_sel - tts_last_carrier_quip_tts >= TTS_CARRIER_QUIP_GAP_MS:
-                            audio.speak_voice("Orders?")
+                            audio.speak_voice("orders_query")
                             tts_last_carrier_quip_tts = now_sel
                 tts_prev_sel_sig = sig_tts
 

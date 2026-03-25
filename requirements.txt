@@ -1,3 +1,5 @@
 pygame>=2.5.0
+Pillow>=10.0.0
+# Optional: announcer clip regen on non-Windows (tools/generate_announcer_voice.py)
 pyttsx3>=2.90,<2.99
 comtypes>=1.2.0

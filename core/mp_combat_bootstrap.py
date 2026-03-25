@@ -23,6 +23,7 @@ try:
         parse_obstacles,
         pvp_player_spawn_anchor,
         round_seed,
+        reset_combat_control_groups_for_spawn,
         snap_strike_crafts_to_carriers,
     )
 except ImportError:
@@ -39,8 +40,43 @@ except ImportError:
         parse_obstacles,
         pvp_player_spawn_anchor,
         round_seed,
+        reset_combat_control_groups_for_spawn,
         snap_strike_crafts_to_carriers,
     )
+
+
+def ensure_mp_player_setup_designs(data: dict, player_setup: dict) -> None:
+    """Public: fill missing `designs` entries before relaying or bootstrapping."""
+    _ensure_all_players_have_designs(data, player_setup)
+
+
+def _ensure_all_players_have_designs(data: dict, player_setup: dict) -> None:
+    """Fill missing or empty fleet rows so every player gets a defined task group."""
+    players = player_setup.get("players")
+    if not isinstance(players, list) or not players:
+        return
+    designs = player_setup.get("designs")
+    if not isinstance(designs, dict):
+        designs = {}
+        player_setup["designs"] = designs
+    colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
+    for pname in players:
+        p = str(pname)
+        rows = designs.get(p)
+        if isinstance(rows, list) and len(rows) > 0:
+            continue
+        cid = int(max(0, min(int(colors.get(p, 0)), 5)))
+        ng, _ = build_initial_player_fleet(
+            data,
+            owner_id=p,
+            color_id=cid,
+            label_prefix=f"{p}:",
+        )
+        designs[p] = [
+            {"class_name": g.class_name, "label": g.label}
+            for g in ng
+            if g.side == "player" and g.render_capital and not g.dead
+        ]
 
 
 def bootstrap_mp_combat_match(
@@ -54,11 +90,14 @@ def bootstrap_mp_combat_match(
     crafts: List[Any],
     player_setup: Optional[dict] = None,
     mp_pvp: bool = False,
+    control_groups: Optional[List[Any]] = None,
+    cg_weapons_free: Optional[List[bool]] = None,
 ) -> Any:
     """Replace `groups` / `crafts` contents and return the new `mission`."""
     groups.clear()
     crafts.clear()
     if isinstance(player_setup, dict) and isinstance(player_setup.get("players"), list):
+        _ensure_all_players_have_designs(data, player_setup)
         players = normalize_mp_player_order(player_setup.get("players") or [])
         colors = player_setup.get("colors") if isinstance(player_setup.get("colors"), dict) else {}
         designs = player_setup.get("designs") if isinstance(player_setup.get("designs"), dict) else {}
@@ -102,4 +141,6 @@ def bootstrap_mp_combat_match(
         mp_pvp=bool(mp_pvp),
     )
     snap_strike_crafts_to_carriers(crafts)
+    if control_groups is not None and cg_weapons_free is not None:
+        reset_combat_control_groups_for_spawn(groups, control_groups, cg_weapons_free)
     return mission

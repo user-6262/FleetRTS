@@ -17,6 +17,7 @@ try:
     from combat_engine import fog_cell_visible
     from combat_math import dist_xy
     from combat_mp import apply_combat_command, _save_selection, _restore_selection
+    from combat_ordnance import notify_player_unit_damaged_for_engagement
     from combat_sim import (
         CombatAudioEvents, CombatSimHooks, CombatStepResult,
         apply_combat_death_audio, step_combat_frame,
@@ -27,16 +28,20 @@ try:
     from demo_game import (
         CONTROL_GROUP_SLOTS, FORMATION_MODE_CARRIER_CORE,
         FORMATION_MODE_DAMAGED_CORE, FORMATION_MODE_RING,
+        toggle_weapon_stance_for_selection,
+        weapon_stance_display_for_selection,
     )
     from net.combat_net import (
         combat_cmd as net_combat_cmd, combat_snap as net_combat_snap,
         COMBAT_CMD, COMBAT_SNAP,
     )
+    from ship_portraits import PORTRAIT_THUMB_MAX, ShipPortraitCache
 except ImportError:
     from core.combat_constants import WORLD_H, WORLD_W
     from core.combat_engine import fog_cell_visible
     from core.combat_math import dist_xy
     from core.combat_mp import apply_combat_command, _save_selection, _restore_selection
+    from core.combat_ordnance import notify_player_unit_damaged_for_engagement
     from core.combat_sim import (
         CombatAudioEvents, CombatSimHooks, CombatStepResult,
         apply_combat_death_audio, step_combat_frame,
@@ -47,11 +52,14 @@ except ImportError:
     from core.demo_game import (
         CONTROL_GROUP_SLOTS, FORMATION_MODE_CARRIER_CORE,
         FORMATION_MODE_DAMAGED_CORE, FORMATION_MODE_RING,
+        toggle_weapon_stance_for_selection,
+        weapon_stance_display_for_selection,
     )
     from core.net.combat_net import (
         combat_cmd as net_combat_cmd, combat_snap as net_combat_snap,
         COMBAT_CMD, COMBAT_SNAP,
     )
+    from core.ship_portraits import PORTRAIT_THUMB_MAX, ShipPortraitCache
 
 from draw import (
     BG_DEEP, BG_PANEL, BORDER_PANEL, BORDER_BTN, BORDER_BTN_HOT,
@@ -69,6 +77,8 @@ FORMATION_BASE_R = 58
 FORMATION_PER_UNIT = 12
 FORMATION_MODE_NAMES = ("Ring", "Carrier core", "Damaged core")
 ORDER_PANEL_W = 208
+PORTRAIT_STRIP_W = 260
+PORTRAIT_STRIP_GAP = 8
 TTS_ENEMY_KILL_GAP_MS = 2600
 TTS_PLAYER_CAP_LOSS_GAP_MS = 4500
 TTS_ORDER_QUIP_GAP_MS = 2200
@@ -87,17 +97,45 @@ def _order_panel_rect() -> pygame.Rect:
     return pygame.Rect(WIDTH - ORDER_PANEL_W, VIEW_H, ORDER_PANEL_W, BOTTOM_BAR_H)
 
 
+def _portrait_strip_rect() -> pygame.Rect:
+    return pygame.Rect(
+        WIDTH - ORDER_PANEL_W - PORTRAIT_STRIP_GAP - PORTRAIT_STRIP_W,
+        VIEW_H,
+        PORTRAIT_STRIP_W,
+        BOTTOM_BAR_H,
+    )
+
+
+def _order_grid_metrics() -> Tuple[pygame.Rect, int, int, int, int]:
+    r = _order_panel_rect()
+    pad, title_h = 5, 14
+    bw = max(40, (r.w - pad * 3) // 2)
+    inner_h = r.h - pad * 2 - title_h
+    row_gap = 4
+    n_rows = 5
+    bh = max(12, (inner_h - row_gap * (n_rows - 1)) // n_rows)
+    return r, pad, title_h, bw, bh
+
+
+def _order_cell_rect(row: int, col: int) -> pygame.Rect:
+    r, pad, title_h, bw, bh = _order_grid_metrics()
+    gap = 4
+    x = r.x + pad + col * (bw + pad)
+    y = r.y + pad + title_h + row * (bh + gap)
+    return pygame.Rect(int(x), int(y), int(bw), int(bh))
+
+
+def _fire_at_will_btn_rect() -> pygame.Rect:
+    """Bottom-right cell of the order grid (column 1, row 4): fire-at-will toggle."""
+    return _order_cell_rect(4, 1)
+
+
 def _cg_slot_rect(slot: int) -> pygame.Rect:
     w, gap, tm = 52, 4, 8
     return pygame.Rect(8 + slot * (w + gap), VIEW_H + tm, w, BOTTOM_BAR_H - tm * 2)
 
 
 def _order_cells() -> List[Tuple[pygame.Rect, str, str]]:
-    r = _order_panel_rect()
-    pad, title_h, stance_h = 5, 14, 36
-    bw = max(40, (r.w - pad * 3) // 2)
-    inner = max(48, r.h - pad * 2 - title_h - stance_h)
-    bh = max(12, (inner - 20) // 6)
     specs = [
         ("Move", "move"), ("Atk-move", "attack_move"),
         ("Attack", "attack_target"), ("Hold", "hold"),
@@ -108,9 +146,7 @@ def _order_cells() -> List[Tuple[pygame.Rect, str, str]]:
     out: List[Tuple[pygame.Rect, str, str]] = []
     for i, (lab, act) in enumerate(specs):
         row, col = divmod(i, 2)
-        x = r.x + pad + col * (bw + pad)
-        y = r.y + pad + title_h + row * (bh + 4)
-        out.append((pygame.Rect(x, y, bw, bh), act, lab))
+        out.append((_order_cell_rect(row, col), act, lab))
     return out
 
 
@@ -209,14 +245,21 @@ class CombatScene:
         self._paused = False
         self._hover_menu_btn = False
         self._order_hover: Optional[str] = None
+        self._faw_hover = False
         self._drag_anchor: Optional[Tuple[int, int]] = None
-        self._awaiting: Optional[str] = None  # "move", "attack_move", "attack_target"
+        self._drag_last: Optional[Tuple[int, int]] = None  # last cursor in world view during box drag
+        self._awaiting: Optional[str] = None  # "move", "attack_move", "attack_target", "capital_context"
+        self._await_fighter_strike = False
+        self._await_bomber_strike = False
+        self._portrait_cache = ShipPortraitCache()
 
     # ── update ──────────────────────────────────────────────────────────────
 
     def update(self, dt: float, gs: Any, ctx: RunContext) -> Optional[str]:
         if self._paused:
             return None
+
+        gs.mp.fm_holder[0] = gs.round.formation_mode
 
         keys = pygame.key.get_pressed()
         dx = dy = 0.0
@@ -244,7 +287,12 @@ class CombatScene:
         if mp:
             self._host_apply_commands(gs)
 
-        hooks = CombatSimHooks(on_player_hull_hit=lambda _g: None)
+        def on_player_hull_hit(tgt: Any) -> None:
+            notify_player_unit_damaged_for_engagement(
+                tgt, gs.combat.control_groups, gs.combat.cg_weapons_free
+            )
+
+        hooks = CombatSimHooks(on_player_hull_hit=on_player_hull_hit)
         res: CombatStepResult = step_combat_frame(
             data=gs.data, dt=dt,
             round_idx=gs.round.round_idx,
@@ -300,20 +348,32 @@ class CombatScene:
     # ── MP sync ──────────────────────────────────────────────────────────────
 
     def _poll_relay(self, gs: Any) -> None:
-        msgs = gs.mp.relay.poll()
-        for msg in msgs:
-            t = msg.get("t", "")
-            if t == COMBAT_CMD and gs.mp.lobby_host:
-                gs.mp.host_cmd_queue.append(msg)
-            elif t == COMBAT_SNAP and not gs.mp.lobby_host:
-                gs.mp.pending_snap = msg
+        for msg in gs.mp.relay.poll():
+            mt = msg.get("t", "")
+            if mt != "relay":
+                continue
+            body = msg.get("body")
+            if not isinstance(body, dict):
+                continue
+            bt = body.get("t", "")
+            if bt == COMBAT_CMD and gs.mp.lobby_host:
+                cmd = dict(body)
+                cmd["_sender"] = str(msg.get("from") or "")
+                gs.mp.host_cmd_queue.append(cmd)
+            elif bt == COMBAT_SNAP and not gs.mp.lobby_host:
+                gs.mp.pending_snap = dict(body)
 
     def _host_apply_commands(self, gs: Any) -> None:
         now_ms = pygame.time.get_ticks()
         pram = [gs.combat.ping_ready_at_ms]
         while gs.mp.host_cmd_queue:
-            cmd = gs.mp.host_cmd_queue.pop(0)
+            raw = gs.mp.host_cmd_queue.pop(0)
             pram[0] = gs.combat.ping_ready_at_ms
+            cmd = {
+                "kind": str(raw.get("kind", "")),
+                "payload": dict(raw.get("payload") or {}),
+                "sender": str(raw.get("_sender") or ""),
+            }
             apply_combat_command(
                 data=gs.data,
                 groups=gs.combat.groups,
@@ -436,6 +496,144 @@ class CombatScene:
             payload=payload if payload else None,
         ))
 
+    def _apply_host_combat_cmd(self, gs: Any, kind: str, payload: Dict[str, Any]) -> None:
+        """Authoritative apply on host / single-player (same path as MP host queue)."""
+        gs.mp.fm_holder[0] = gs.round.formation_mode
+        now_ms = pygame.time.get_ticks()
+        pram = [gs.combat.ping_ready_at_ms]
+        apply_combat_command(
+            data=gs.data,
+            groups=gs.combat.groups,
+            crafts=gs.combat.crafts,
+            mission=gs.combat.mission,
+            formation_mode_holder=gs.mp.fm_holder,
+            active_pings=gs.combat.active_pings,
+            sensor_ghosts=gs.combat.sensor_ghosts,
+            ping_ghost_anchor_labels=gs.combat.ping_ghost_anchor_labels,
+            mission_obstacles=(
+                gs.combat.mission.obstacles if gs.combat.mission else []
+            ),
+            cg_weapons_free=gs.combat.cg_weapons_free,
+            control_groups=gs.combat.control_groups,
+            ping_ready_at_ms_holder=pram,
+            now_ms=now_ms,
+            audio=gs.audio,
+            cmd={"kind": kind, "payload": payload, "sender": ""},
+        )
+        gs.round.formation_mode = gs.mp.fm_holder[0]
+        gs.combat.ping_ready_at_ms = pram[0]
+
+    @staticmethod
+    def _selection_labels_payload(gs: Any) -> Dict[str, List[str]]:
+        return {
+            "group_labels": [
+                g.label
+                for g in gs.combat.groups
+                if g.side == "player" and g.selected and not g.dead
+            ],
+            "craft_labels": [
+                c.label
+                for c in gs.combat.crafts
+                if c.side == "player" and c.selected and not c.dead
+            ],
+        }
+
+    def _clear_air_strike_awaiting(self) -> None:
+        self._await_fighter_strike = False
+        self._await_bomber_strike = False
+
+    def _begin_air_order_mode(self, gs: Any) -> None:
+        """Mirror legacy [F]: carrier / wing strike-rally, or capital context."""
+        sel = [
+            g
+            for g in gs.combat.groups
+            if g.side == "player" and g.selected and not g.dead
+        ]
+        wing_sel = [
+            c
+            for c in gs.combat.crafts
+            if c.side == "player"
+            and c.selected
+            and not c.dead
+            and not c.parent.dead
+            and c.parent.class_name == "Carrier"
+        ]
+        fight_w = any(
+            c.class_name in ("Fighter", "Interceptor") for c in wing_sel
+        )
+        bomb_w = any(c.class_name == "Bomber" for c in wing_sel)
+        self._awaiting = None
+        self._clear_air_strike_awaiting()
+        if fight_w and bomb_w:
+            self._await_fighter_strike = True
+            self._await_bomber_strike = True
+            gs.audio.play_positive()
+        elif fight_w:
+            self._await_fighter_strike = True
+            gs.audio.play_positive()
+        elif bomb_w:
+            self._await_bomber_strike = True
+            gs.audio.play_positive()
+        elif any(g.class_name == "Carrier" for g in sel):
+            self._await_fighter_strike = True
+            self._await_bomber_strike = True
+            gs.audio.play_positive()
+        elif any(g.render_capital for g in sel):
+            self._awaiting = "capital_context"
+            gs.audio.play_positive()
+        else:
+            gs.audio.play_negative()
+
+    def _dispatch_strike_pick(
+        self,
+        gs: Any,
+        *,
+        fighter: bool,
+        cam_x: float,
+        cam_y: float,
+        mx: int,
+        my: int,
+    ) -> None:
+        kind = "fighter_strike_pick" if fighter else "bomber_strike_pick"
+        payload = {
+            "cam_x": float(cam_x),
+            "cam_y": float(cam_y),
+            "mx": float(mx),
+            "my": float(my),
+            **self._selection_labels_payload(gs),
+        }
+        if gs.mp.relay is not None and not gs.mp.lobby_host:
+            self._send_cmd(gs, kind, **payload)
+            gs.audio.play_positive()
+            self._clear_air_strike_awaiting()
+            return
+        self._apply_host_combat_cmd(gs, kind, payload)
+        gs.audio.play_positive()
+        self._clear_air_strike_awaiting()
+
+    def _dispatch_capital_context_pick(
+        self,
+        gs: Any,
+        cam_x: float,
+        cam_y: float,
+        mx: int,
+        my: int,
+    ) -> None:
+        self._awaiting = None
+        payload = {
+            "cam_x": float(cam_x),
+            "cam_y": float(cam_y),
+            "mx": float(mx),
+            "my": float(my),
+            **self._selection_labels_payload(gs),
+        }
+        if gs.mp.relay is not None and not gs.mp.lobby_host:
+            self._send_cmd(gs, "capital_context_pick", **payload)
+            gs.audio.play_positive()
+            return
+        self._apply_host_combat_cmd(gs, "capital_context_pick", payload)
+        gs.audio.play_positive()
+
     # ── events ──────────────────────────────────────────────────────────────
 
     def handle_event(self, event: pygame.event.Event, gs: Any,
@@ -449,9 +647,12 @@ class CombatScene:
         if event.type == pygame.MOUSEMOTION:
             mx, my = ctx.to_internal(event.pos)
             self._order_hover = None
+            self._faw_hover = my >= VIEW_H and _fire_at_will_btn_rect().collidepoint(mx, my)
             for rect, act, _lab in _order_cells():
                 if rect.collidepoint(mx, my):
                     self._order_hover = act
+            if self._drag_anchor is not None and my < VIEW_H:
+                self._drag_last = (mx, my)
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             mx, my = ctx.to_internal(event.pos)
@@ -461,11 +662,17 @@ class CombatScene:
 
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             mx, my = ctx.to_internal(event.pos)
-            if self._drag_anchor and my < VIEW_H:
+            if self._drag_anchor is not None:
                 ax, ay = self._drag_anchor
-                if abs(mx - ax) > 12 or abs(my - ay) > 12:
-                    self._box_select(gs, ax, ay, mx, my)
+                if self._drag_last is not None and my >= VIEW_H:
+                    ex, ey = self._drag_last
+                else:
+                    ex = max(0, min(VIEW_W - 1, mx))
+                    ey = max(0, min(VIEW_H - 1, my))
+                if abs(ex - ax) > 12 or abs(ey - ay) > 12:
+                    self._box_select(gs, ax, ay, ex, ey)
             self._drag_anchor = None
+            self._drag_last = None
 
         elif event.type == pygame.KEYDOWN:
             return self._handle_key(event, gs)
@@ -488,7 +695,7 @@ class CombatScene:
                             mx: int, my: int, gs: Any) -> Optional[str]:
         cam_x, cam_y = gs.camera.cam_x, gs.camera.cam_y
         if event.button == 1:
-            if self._awaiting in ("attack_target",):
+            if self._awaiting == "attack_target":
                 target = _pick_hostile_at(gs.combat.groups, gs.combat.crafts,
                                           mx, my, cam_x, cam_y)
                 if target:
@@ -501,9 +708,26 @@ class CombatScene:
                                    cam_x=cam_x, cam_y=cam_y, mx=mx, my=my)
                 self._awaiting = None
                 return None
+            if self._await_fighter_strike:
+                self._dispatch_strike_pick(
+                    gs, fighter=True, cam_x=cam_x, cam_y=cam_y, mx=mx, my=my
+                )
+                return None
+            if self._await_bomber_strike and not self._await_fighter_strike:
+                self._dispatch_strike_pick(
+                    gs, fighter=False, cam_x=cam_x, cam_y=cam_y, mx=mx, my=my
+                )
+                return None
+            if self._awaiting == "capital_context":
+                self._dispatch_capital_context_pick(
+                    gs, cam_x, cam_y, mx, my
+                )
+                return None
             shift = (pygame.key.get_mods() & pygame.KMOD_SHIFT) != 0
             hit = _pick_capital_at(gs.combat.groups, mx, my, cam_x, cam_y)
             if hit:
+                self._drag_anchor = None
+                self._drag_last = None
                 if shift:
                     hit.selected = not hit.selected
                 else:
@@ -511,6 +735,7 @@ class CombatScene:
                 gs.audio.play_positive()
             else:
                 self._drag_anchor = (mx, my)
+                self._drag_last = (mx, my)
 
         elif event.button == 3:
             wpx, wpy = screen_to_world(float(mx), float(my), cam_x, cam_y)
@@ -524,28 +749,49 @@ class CombatScene:
                                formation_mode=gs.round.formation_mode,
                                attack_move=True)
                 self._awaiting = None
+                return None
+            if self._await_bomber_strike:
+                self._dispatch_strike_pick(
+                    gs, fighter=False, cam_x=cam_x, cam_y=cam_y, mx=mx, my=my
+                )
+                return None
+            if self._await_fighter_strike:
+                self._dispatch_strike_pick(
+                    gs, fighter=True, cam_x=cam_x, cam_y=cam_y, mx=mx, my=my
+                )
+                return None
+            target = _pick_hostile_at(gs.combat.groups, gs.combat.crafts,
+                                      mx, my, cam_x, cam_y)
+            if target:
+                for g in sel:
+                    g.attack_target = target
+                gs.audio.play_positive()
+                self._send_cmd(gs, "attack_target_pick",
+                               group_labels=[g.label for g in sel],
+                               cam_x=cam_x, cam_y=cam_y, mx=mx, my=my)
             else:
-                target = _pick_hostile_at(gs.combat.groups, gs.combat.crafts,
-                                          mx, my, cam_x, cam_y)
-                if target:
-                    for g in sel:
-                        g.attack_target = target
-                    gs.audio.play_positive()
-                    self._send_cmd(gs, "attack_target_pick",
-                                   group_labels=[g.label for g in sel],
-                                   cam_x=cam_x, cam_y=cam_y, mx=mx, my=my)
-                else:
-                    _issue_move(sel, wpx, wpy, gs.round.formation_mode)
-                    gs.audio.play_positive()
-                    self._send_cmd(gs, "move_world",
-                                   group_labels=[g.label for g in sel],
-                                   wpx=wpx, wpy=wpy,
-                                   formation_mode=gs.round.formation_mode)
+                _issue_move(sel, wpx, wpy, gs.round.formation_mode)
+                gs.audio.play_positive()
+                self._send_cmd(gs, "move_world",
+                               group_labels=[g.label for g in sel],
+                               wpx=wpx, wpy=wpy,
+                               formation_mode=gs.round.formation_mode)
         return None
 
     def _handle_hud_click(self, event: pygame.event.Event,
                           mx: int, my: int, gs: Any) -> Optional[str]:
         if event.button != 1:
+            return None
+        if _fire_at_will_btn_rect().collidepoint(mx, my):
+            if gs.mp.relay is not None and not gs.mp.lobby_host:
+                self._send_cmd(gs, "weapons_toggle")
+                gs.audio.play_positive()
+            elif toggle_weapon_stance_for_selection(
+                gs.combat.groups, gs.combat.control_groups, gs.combat.cg_weapons_free
+            ):
+                gs.audio.play_positive()
+            else:
+                gs.audio.play_negative()
             return None
         for rect, act, _lab in _order_cells():
             if rect.collidepoint(mx, my):
@@ -570,25 +816,39 @@ class CombatScene:
     def _exec_order(self, act: str, gs: Any) -> Optional[str]:
         sel = _sel_caps(gs)
         if act == "move":
+            self._clear_air_strike_awaiting()
             self._awaiting = "move"
             gs.audio.play_positive()
         elif act == "attack_move":
+            self._clear_air_strike_awaiting()
             self._awaiting = "attack_move"
             gs.audio.play_positive()
         elif act == "attack_target":
+            self._clear_air_strike_awaiting()
             self._awaiting = "attack_target"
             gs.audio.play_positive()
-        elif act == "hold":
-            for g in sel:
-                g.waypoint = None
-                g.attack_move = False
+        elif act == "strike":
+            self._begin_air_order_mode(gs)
+        elif act == "recall":
+            pl = self._selection_labels_payload(gs)
+            if gs.mp.relay is not None and not gs.mp.lobby_host:
+                self._send_cmd(gs, "recall_carriers", **pl)
+            else:
+                self._apply_host_combat_cmd(gs, "recall_carriers", pl)
             gs.audio.play_positive()
-            self._send_cmd(gs, "hold",
-                           group_labels=[g.label for g in sel])
+        elif act == "hold":
+            pl = self._selection_labels_payload(gs)
+            self._clear_air_strike_awaiting()
+            if gs.mp.relay is not None and not gs.mp.lobby_host:
+                self._send_cmd(gs, "hold", **pl)
+            else:
+                self._apply_host_combat_cmd(gs, "hold", pl)
+            gs.audio.play_positive()
         elif act == "formation":
             fm = gs.round.formation_mode
             fm = (fm + 1) % 3
             gs.round.formation_mode = fm
+            gs.mp.fm_holder[0] = fm
             gs.audio.play_positive()
             self._send_cmd(gs, "formation_cycle")
         elif act == "focus":
@@ -628,24 +888,34 @@ class CombatScene:
 
         elif key == pygame.K_TAB:
             gs.round.formation_mode = (gs.round.formation_mode + 1) % 3
+            gs.mp.fm_holder[0] = gs.round.formation_mode
             gs.audio.play_positive()
             self._send_cmd(gs, "formation_cycle")
 
         elif key == pygame.K_h:
-            sel = _sel_caps(gs)
-            for g in sel:
-                g.waypoint = None
-                g.attack_move = False
+            pl = self._selection_labels_payload(gs)
+            self._clear_air_strike_awaiting()
+            if gs.mp.relay is not None and not gs.mp.lobby_host:
+                self._send_cmd(gs, "hold", **pl)
+            else:
+                self._apply_host_combat_cmd(gs, "hold", pl)
             gs.audio.play_positive()
-            self._send_cmd(gs, "hold",
-                           group_labels=[g.label for g in sel])
 
         elif key == pygame.K_g:
+            self._clear_air_strike_awaiting()
             self._awaiting = "attack_move"
             gs.audio.play_positive()
 
         elif key == pygame.K_f:
-            self._awaiting = "attack_target"
+            self._begin_air_order_mode(gs)
+
+        elif key == pygame.K_c:
+            pl = self._selection_labels_payload(gs)
+            self._clear_air_strike_awaiting()
+            if gs.mp.relay is not None and not gs.mp.lobby_host:
+                self._send_cmd(gs, "recall_carriers", **pl)
+            else:
+                self._apply_host_combat_cmd(gs, "recall_carriers", pl)
             gs.audio.play_positive()
 
         elif pygame.K_1 <= key <= pygame.K_9:
@@ -708,12 +978,12 @@ class CombatScene:
 
         self._draw_control_groups(screen, gs)
         self._draw_status_text(screen, gs)
+        self._draw_selection_portraits(screen, gs)
         self._draw_order_panel(screen, gs)
 
-        if self._awaiting:
-            hint = gs.fonts.main.render(
-                f"Click to issue: {self._awaiting.replace('_', ' ')} (RMB to cancel)",
-                True, TEXT_ACCENT)
+        hint_s = self._order_mode_hint()
+        if hint_s:
+            hint = gs.fonts.main.render(hint_s, True, TEXT_ACCENT)
             screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, VIEW_H - 24))
 
         if gs.mp.relay is not None and gs.mp.desync_until_ms > pygame.time.get_ticks():
@@ -743,6 +1013,12 @@ class CombatScene:
 
     def _draw_status_text(self, screen: pygame.Surface, gs: Any) -> None:
         x0 = _cg_slot_rect(CONTROL_GROUP_SLOTS - 1).right + 14
+        clip_prev = screen.get_clip()
+        if _sel_caps(gs):
+            pr = _portrait_strip_rect()
+            screen.set_clip(
+                pygame.Rect(x0, VIEW_H, max(0, pr.x - x0 - 6), BOTTOM_BAR_H)
+            )
         fm_name = FORMATION_MODE_NAMES[gs.round.formation_mode]
         line1 = (f"Round {gs.round.round_idx}  |  {fm_name}"
                  f"  |  Salvage {gs.combat.salvage[0]}"
@@ -764,6 +1040,95 @@ class CombatScene:
                 line2 = f"SALVAGE -- pods {m.pods_collected}/{len(m.pods)} (need {m.pods_required})"
             st2 = gs.fonts.micro.render(line2, True, TEXT_DIM)
             screen.blit(st2, (x0, VIEW_H + 36))
+        screen.set_clip(clip_prev)
+
+    def _draw_selection_portraits(self, screen: pygame.Surface, gs: Any) -> None:
+        sel = sorted(_sel_caps(gs), key=lambda g: (g.label, g.class_name))
+        if not sel:
+            return
+        r = _portrait_strip_rect()
+        pygame.draw.rect(screen, BG_PANEL, r)
+        pygame.draw.rect(screen, BORDER_PANEL, r, width=1)
+        title = gs.fonts.tiny.render("SELECTED", True, TEXT_ACCENT)
+        screen.blit(title, (r.x + 6, r.y + 2))
+
+        pad_x, pad_top = 6, 16
+        gap = 4
+        max_slots = 4
+        shown = sel[:max_slots]
+        n = len(shown)
+        inner_w = r.w - pad_x * 2
+        slot_w = max(40, (inner_w - gap * (n - 1)) // max(1, n))
+        img_y = r.y + pad_top
+        for i, g in enumerate(shown):
+            cx = r.x + pad_x + i * (slot_w + gap)
+            surf = self._portrait_cache.surface_for_unit(g.class_name, g.label)
+            if surf is not None:
+                ix = cx + (slot_w - surf.get_width()) // 2
+                screen.blit(surf, (ix, img_y))
+            else:
+                box = pygame.Rect(cx + 2, img_y + 8, slot_w - 4, PORTRAIT_THUMB_MAX - 24)
+                pygame.draw.rect(screen, (18, 28, 42), box, border_radius=3)
+                pygame.draw.rect(screen, (55, 75, 98), box, width=1, border_radius=3)
+            lab = (g.class_name or "?")[:11]
+            lt = gs.fonts.micro.render(lab, True, TEXT_DIM)
+            lx = cx + (slot_w - lt.get_width()) // 2
+            screen.blit(lt, (lx, img_y + PORTRAIT_THUMB_MAX + 2))
+
+        extra = len(sel) - max_slots
+        if extra > 0:
+            more = gs.fonts.micro.render(f"+{extra}", True, TEXT_ACCENT)
+            screen.blit(more, (r.right - more.get_width() - 8, r.y + r.h // 2 - more.get_height() // 2))
+
+    def _order_mode_hint(self) -> Optional[str]:
+        if self._await_fighter_strike and self._await_bomber_strike:
+            return (
+                "Air orders: LMB fighters — RMB bombers "
+                "(enemy/relay = attack, empty = rally)"
+            )
+        if self._await_fighter_strike:
+            return (
+                "Fighters: LMB or RMB on map "
+                "(enemy/relay = attack, empty = rally)"
+            )
+        if self._await_bomber_strike:
+            return (
+                "Bombers: click map "
+                "(enemy/relay = attack, empty = rally) — LMB or RMB"
+            )
+        if self._awaiting == "capital_context":
+            return "Fleet: LMB enemy/relay to focus, empty ground to move"
+        if self._awaiting:
+            return (
+                f"Click to issue: {self._awaiting.replace('_', ' ')} "
+                "(RMB to cancel)"
+            )
+        return None
+
+    def _draw_fire_at_will_button(self, screen: pygame.Surface, gs: Any) -> None:
+        r = _fire_at_will_btn_rect()
+        slang, scol = weapon_stance_display_for_selection(
+            gs.combat.groups, gs.combat.control_groups, gs.combat.cg_weapons_free
+        )
+        if slang.startswith("Group weapons: FREE"):
+            status = "ON"
+        elif slang.startswith("Group weapons: HOLD"):
+            status = "OFF"
+        elif "mixed" in slang.lower():
+            status = "Mixed"
+        elif "assign" in slang.lower():
+            status = "Set group"
+        else:
+            status = "Select ship"
+
+        fill = BTN_FILL_HOT if self._faw_hover else BTN_FILL
+        bd = BORDER_BTN_HOT if self._faw_hover else BORDER_BTN
+        pygame.draw.rect(screen, fill, r, border_radius=4)
+        pygame.draw.rect(screen, bd, r, width=1, border_radius=4)
+        t0 = gs.fonts.micro.render("Fire at will", True, TEXT_SECONDARY)
+        t1 = gs.fonts.micro.render(status, True, scol)
+        screen.blit(t0, (r.centerx - t0.get_width() // 2, r.y + 4))
+        screen.blit(t1, (r.centerx - t1.get_width() // 2, r.y + 20))
 
     def _draw_order_panel(self, screen: pygame.Surface, gs: Any) -> None:
         r = _order_panel_rect()
@@ -780,6 +1145,8 @@ class CombatScene:
             pygame.draw.rect(screen, border, rect, width=1, border_radius=4)
             t = gs.fonts.micro.render(lab, True, TEXT_PRIMARY)
             screen.blit(t, (rect.x + 4, rect.centery - t.get_height() // 2))
+
+        self._draw_fire_at_will_button(screen, gs)
 
     def _draw_pause(self, screen: pygame.Surface, gs: Any) -> None:
         ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)

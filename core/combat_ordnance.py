@@ -77,6 +77,43 @@ def _dg():
     return dg
 
 
+# Hull-local missile tubes: (forward, starboard) metres from launcher CG, rotated by ship heading.
+_MISSILE_TUBE_COUNT = 8
+_MISSILE_TUBE_OFFSETS: Tuple[Tuple[float, float], ...] = (
+    (14.0, 0.0),
+    (12.5, 6.5),
+    (11.0, 9.5),
+    (8.5, 10.5),
+    (6.5, 7.0),
+    (8.5, -10.5),
+    (11.0, -9.5),
+    (12.5, -6.5),
+)
+
+
+def _launcher_heading_for_missile_tubes(launcher: Optional[Any]) -> float:
+    if launcher is None:
+        return -math.pi / 2
+    dg = _dg()
+    if hasattr(launcher, "parent"):
+        return float(getattr(launcher, "heading", -math.pi / 2))
+    return dg.heading_for_group(launcher)
+
+
+def _missile_spawn_offset_xy(launcher: Optional[Any]) -> Tuple[float, float]:
+    """World (dx, dy) from hull centre; cycles tubes so salvos don't share one muzzle."""
+    hdg = _launcher_heading_for_missile_tubes(launcher)
+    fx, fy = math.cos(hdg), math.sin(hdg)
+    sx, sy = -fy, fx
+    if launcher is None:
+        lix, liy = _MISSILE_TUBE_OFFSETS[0]
+    else:
+        idx = int(getattr(launcher, "_missile_tube_i", 0)) % _MISSILE_TUBE_COUNT
+        setattr(launcher, "_missile_tube_i", idx + 1)
+        lix, liy = _MISSILE_TUBE_OFFSETS[idx]
+    return lix * fx + liy * sx, lix * fy + liy * sy
+
+
 def control_group_slots_for_capital_label(
     control_groups: List[Optional[List[str]]], capital_label: str
 ) -> List[int]:
@@ -136,13 +173,21 @@ def prune_attack_targets(groups: List[Any], mission: Optional[Any] = None) -> No
     for g in groups:
         if g.side != "player":
             continue
+        oid = getattr(g, "owner_id", None)
         if not is_valid_attack_focus_for_side(
             "player",
             g.attack_target,
-            attacker_owner=getattr(g, "owner_id", None),
+            attacker_owner=oid,
             mp_pvp=pvp,
         ):
             g.attack_target = None
+        if not is_valid_attack_focus_for_side(
+            "player",
+            getattr(g, "strike_focus_target", None),
+            attacker_owner=oid,
+            mp_pvp=pvp,
+        ):
+            g.strike_focus_target = None
 
 
 def apply_damage(
@@ -924,10 +969,11 @@ def try_fire_weapons(
                 col = (255, 120, 100)
             mz = origin_z + random.uniform(-4, 4)
             intercept_hp = float(proj.get("pd_intercept_hp", MISSILE_PD_INTERCEPT_HP_DEFAULT))
+            off_x, off_y = _missile_spawn_offset_xy(launcher)
             missiles.append(
                 dg.Missile(
-                    x=x + ux * 14,
-                    y=y + uy * 14,
+                    x=x + off_x,
+                    y=y + off_y,
                     vx=ux * launch_spd,
                     vy=uy * launch_spd,
                     speed=cruise,

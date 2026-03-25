@@ -20,8 +20,10 @@ Env:
   FLEETRTS_SIM_PLAYER — display name on relay (default __FleetRTS_Sim__)
   FLEETRTS_SIM_HZ — fixed sim rate (default 20)
 
-Limitation: uses the default starter fleet from build_initial_player_fleet, not
-per-player HTTP fleet payloads (future work).
+When start_match includes player_setup (players, designs, colors), the same
+bootstrap_mp_combat_match path as the pygame authoritative host builds per-player
+fleets (including optional hangar_loadout_choice on carrier rows). If player_setup
+is missing, bootstrap falls back to a single default fleet.
 """
 from __future__ import annotations
 
@@ -54,7 +56,7 @@ from combat import (  # noqa: E402
     TTS_ENEMY_KILL_GAP_MS,
     TTS_PLAYER_CAP_LOSS_GAP_MS,
     CombatSimHooks,
-    all_player_capital_labels,
+    notify_player_unit_damaged_for_engagement,
     apply_combat_command,
     apply_combat_death_audio,
     combat_cmd_tick_allowed,
@@ -232,8 +234,6 @@ def main() -> None:
             seeker_ghosts.clear()
             ping_ghost_anchor_labels.clear()
             ping_ready_at_ms = 0
-            control_groups[:] = [None] * CONTROL_GROUP_SLOTS
-            cg_weapons_free[:] = [False] * CONTROL_GROUP_SLOTS
             mission = mpboot.bootstrap_mp_combat_match(
                 data=data,
                 round_idx=int(cfg["round_idx"]),
@@ -244,8 +244,9 @@ def main() -> None:
                 crafts=crafts,
                 player_setup=cfg.get("player_setup"),
                 mp_pvp=not bool(cfg.get("coop", True)),
+                control_groups=control_groups,
+                cg_weapons_free=cg_weapons_free,
             )
-            control_groups[0] = all_player_capital_labels(groups)
             combat_mode[0] = "running"
             last_snap_ms = 0
             print("[FleetRTS sim] Match started — stepping combat.", flush=True)
@@ -325,7 +326,11 @@ def main() -> None:
                 vfx_beams=vfx_beams,
                 ballistics=ballistics,
                 pd_rof_mult=pd_rof_mult,
-                hooks=CombatSimHooks(on_player_hull_hit=lambda _t: None),
+                hooks=CombatSimHooks(
+                    on_player_hull_hit=lambda t, cg=control_groups, wf=cg_weapons_free: notify_player_unit_damaged_for_engagement(
+                        t, cg, wf
+                    )
+                ),
                 phase=phase,
                 outcome=outcome,
             )

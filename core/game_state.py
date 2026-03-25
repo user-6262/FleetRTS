@@ -11,15 +11,17 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
+    from fleet_deployment import DEPLOYMENT_STARTING_SCRAP
     from demo_game import (
-        CONTROL_GROUP_SLOTS, FORMATION_MODE_RING, DEPLOYMENT_STARTING_SCRAP,
+        CONTROL_GROUP_SLOTS, FORMATION_MODE_RING,
         ActivePing, Asteroid, BallisticSlug, Craft, FogState, Group,
         Missile, MissionState, SensorGhost, VFXBeam, VFXSpark,
     )
     from pvp_battlegroups import BattlegroupPreset
 except ImportError:
+    from core.fleet_deployment import DEPLOYMENT_STARTING_SCRAP
     from core.demo_game import (
-        CONTROL_GROUP_SLOTS, FORMATION_MODE_RING, DEPLOYMENT_STARTING_SCRAP,
+        CONTROL_GROUP_SLOTS, FORMATION_MODE_RING,
         ActivePing, Asteroid, BallisticSlug, Craft, FogState, Group,
         Missile, MissionState, SensorGhost, VFXBeam, VFXSpark,
     )

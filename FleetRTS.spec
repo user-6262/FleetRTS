@@ -42,6 +42,7 @@ a = Analysis(
     datas=[
         (str(ROOT / "core" / "data.json"), "core"),
         (str(ROOT / "assets" / "sound"), "assets/sound"),
+        (str(ROOT / "assets" / "portraits" / "ships"), "assets/portraits/ships"),
     ],
     hiddenimports=_NET_HIDDEN,
     hookspath=[],

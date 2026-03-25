@@ -148,12 +148,7 @@ def run() -> None:
     while running:
         dt = clock.tick(FPS) / 1000.0
 
-        scene = manager.current
-        transition = scene.update(dt, gs, ctx)
-        if transition:
-            gs.round.phase = transition
-            manager.phase = transition
-
+        # Process input before sim so clicks (e.g. box select) are not delayed by a heavy update step.
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -173,6 +168,12 @@ def run() -> None:
             if result:
                 gs.round.phase = result
                 manager.phase = result
+
+        scene = manager.current
+        transition = scene.update(dt, gs, ctx)
+        if transition:
+            gs.round.phase = transition
+            manager.phase = transition
 
         manager.current.draw(screen, gs, ctx)
         blit_to_window(ctx.window, screen, ctx.win_w, ctx.win_h)

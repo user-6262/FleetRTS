@@ -16,6 +16,7 @@ try:
     from combat_constants import FOG_CH, FOG_CW, WORLD_H, WORLD_W
     from combat_engine import fog_cell_explored, fog_cell_visible
     from combat_ordnance import (
+        compute_pd_stress_ratio,
         is_valid_attack_focus_for_side,
         pd_stress_color,
         pd_stress_display_level,
@@ -28,6 +29,7 @@ except ImportError:
     from core.combat_constants import FOG_CH, FOG_CW, WORLD_H, WORLD_W
     from core.combat_engine import fog_cell_explored, fog_cell_visible
     from core.combat_ordnance import (
+        compute_pd_stress_ratio,
         is_valid_attack_focus_for_side,
         pd_stress_color,
         pd_stress_display_level,
@@ -65,6 +67,15 @@ ACCENT_GREEN = (80, 200, 130)
 ACCENT_RED = (255, 85, 85)
 ACCENT_TEAL = (0, 72, 58)
 SELECT_YELLOW = (255, 240, 120)
+
+# In-battle navy unit cards (capital > strike craft > ordnance)
+NAVY_GLYPH_FILL = (6, 12, 26)
+NAVY_GLYPH_EDGE = (40, 68, 108)
+NAVY_CARD_FACE = (12, 20, 38)
+NAVY_CARD_FACE_HI = (20, 32, 54)
+NAVY_CARD_OUTLINE = (52, 82, 118)
+NAVY_CARD_OUTLINE_SEL = (240, 215, 110)
+NAVY_BAR_TROUGH = (16, 22, 34)
 
 MP_PLAYER_PALETTE: List[Tuple[int, int, int]] = [
     (90, 170, 255), (120, 210, 150), (255, 170, 95),
@@ -203,6 +214,8 @@ def draw_asteroids(surf: pygame.Surface, obstacles: List[Asteroid],
 def draw_fog_overlay(surf: pygame.Surface, fog: FogState,
                      cam_x: float, cam_y: float) -> None:
     ov = pygame.Surface((VIEW_W, VIEW_H), pygame.SRCALPHA)
+    unseen_rgba = (0, 0, 0, 240)
+    memory_rgba = (0, 0, 0, 88)
     for cj in range(FOG_CH):
         for ci in range(FOG_CW):
             idx = ci + cj * FOG_CW
@@ -220,32 +233,18 @@ def draw_fog_overlay(surf: pygame.Surface, fog: FogState,
                 continue
             if max(p[1] for p in pts_o) < -8 or min(p[1] for p in pts_o) > VIEW_H + 8:
                 continue
-            grain = (ci * 47 + cj * 19) % 37
-            if not fog.explored[idx]:
-                base_a = 228 + min(24, grain)
-                c0 = (4, 8, 20, base_a)
-                c1 = (10, 18, 38, max(40, base_a - 100))
-            else:
-                base_a = 118 + min(28, grain)
-                c0 = (16, 26, 48, base_a)
-                c1 = (28, 42, 72, max(28, base_a - 55))
-            cx = sum(p[0] for p in pts_o) / len(pts_o)
-            cy = sum(p[1] for p in pts_o) / len(pts_o)
-            inner = [(int(cx + (px - cx) * 0.72), int(cy + (py - cy) * 0.72))
-                     for px, py in pts_o]
-            pygame.draw.polygon(ov, c0, pts_o)
-            pygame.draw.polygon(ov, c1, inner)
-            pygame.draw.polygon(ov, (0, 0, 0, 24), pts_o, width=1)
+            fill = unseen_rgba if not fog.explored[idx] else memory_rgba
+            pygame.draw.polygon(ov, fill, pts_o)
     edge = 64
-    sh = (3, 8, 18, 38)
-    pygame.draw.rect(ov, sh, (0, 0, VIEW_W, edge))
-    pygame.draw.rect(ov, sh, (0, VIEW_H - edge, VIEW_W, edge))
-    pygame.draw.rect(ov, sh, (0, 0, edge, VIEW_H))
-    pygame.draw.rect(ov, sh, (VIEW_W - edge, 0, edge, VIEW_H))
+    edge_rgba = (0, 0, 0, 160)
+    pygame.draw.rect(ov, edge_rgba, (0, 0, VIEW_W, edge))
+    pygame.draw.rect(ov, edge_rgba, (0, VIEW_H - edge, VIEW_W, edge))
+    pygame.draw.rect(ov, edge_rgba, (0, 0, edge, VIEW_H))
+    pygame.draw.rect(ov, edge_rgba, (VIEW_W - edge, 0, edge, VIEW_H))
     surf.blit(ov, (0, 0))
 
 # ---------------------------------------------------------------------------
-# NATO-style capital ship glyph
+# Ship glyphs + navy HUD cards (hierarchy: capital > strike craft > ordnance)
 # ---------------------------------------------------------------------------
 
 def heading_for_group(g: Group) -> float:
@@ -254,6 +253,19 @@ def heading_for_group(g: Group) -> float:
         return math.atan2(wy - g.y, wx - g.x)
     return -math.pi / 2
 
+
+def craft_type_abbrev(class_name: str) -> str:
+    c = (class_name or "").strip()
+    low = c.lower()
+    if "bomber" in low:
+        return "BOM"
+    if "interceptor" in low:
+        return "INT"
+    if "fighter" in low:
+        return "FIG"
+    return (c[:3].upper() if c else "---")
+
+
 def draw_capital(surf: pygame.Surface, x: float, y: float,
                  color: Tuple[int, int, int], heading: float,
                  scale: float = 1.0) -> None:
@@ -261,6 +273,7 @@ def draw_capital(surf: pygame.Surface, x: float, y: float,
     w = int(22 * scale)
     h = int(14 * scale)
     rect = pygame.Rect(xi - w // 2, yi - h // 2, w, h)
+    pygame.draw.rect(surf, NAVY_GLYPH_FILL, rect, border_radius=2)
     pygame.draw.rect(surf, color, rect, width=2, border_radius=2)
     L = int(12 * scale)
     hx = math.cos(heading) * L
@@ -270,11 +283,9 @@ def draw_capital(surf: pygame.Surface, x: float, y: float,
             yi + math.sin(heading + 2.4) * 8 * scale)
     right = (xi + math.cos(heading - 2.4) * 8 * scale,
              yi + math.sin(heading - 2.4) * 8 * scale)
+    pygame.draw.polygon(surf, NAVY_GLYPH_FILL, [tip, left, right])
     pygame.draw.polygon(surf, color, [tip, left, right], width=2)
 
-# ---------------------------------------------------------------------------
-# Strike craft triangle
-# ---------------------------------------------------------------------------
 
 def draw_craft(surf: pygame.Surface, x: float, y: float,
                color: Tuple[int, int, int], heading: float,
@@ -286,61 +297,130 @@ def draw_craft(surf: pygame.Surface, x: float, y: float,
           yi + math.sin(heading + 2.35) * s * 0.55)
     p3 = (xi + math.cos(heading - 2.35) * s * 0.55,
           yi + math.sin(heading - 2.35) * s * 0.55)
-    pygame.draw.polygon(surf, color, [p1, p2, p3])
-    pygame.draw.polygon(surf, color, [p1, p2, p3], width=1)
+    pygame.draw.polygon(surf, NAVY_GLYPH_FILL, [p1, p2, p3])
+    pygame.draw.polygon(surf, color, [p1, p2, p3], width=2)
 
-# ---------------------------------------------------------------------------
-# Entity plates (HP label above ships)
-# ---------------------------------------------------------------------------
+
+def draw_navy_hud_card(
+    surf: pygame.Surface,
+    tip_x: float,
+    tip_y: float,
+    sc: float,
+    *,
+    tier: int,
+    line1: str,
+    line2: Optional[str],
+    hp_frac: Optional[float],
+    accent: Tuple[int, int, int],
+    selected: bool,
+    font_top: pygame.font.Font,
+    font_bot: pygame.font.Font,
+) -> None:
+    """Dark navy panel with a chevron pointing at the unit (tip = screen anchor)."""
+    k = max(0.78, min(1.18, float(sc)))
+    if tier == 0:
+        pad_x, pad_y = 7, 5
+        bar_h = max(4, int(5 * k))
+        min_w, min_h = 96, 42
+        radius = 5
+    elif tier == 1:
+        pad_x, pad_y = 3, 2
+        bar_h = max(2, int(2.5 * k))
+        min_w, min_h = 30, 18
+        radius = 3
+    else:
+        pad_x, pad_y = 3, 2
+        bar_h = 0
+        min_w, min_h = 36, 18
+        radius = 3
+
+    t1 = font_top.render(line1[:36], True, TEXT_PRIMARY)
+    t2 = font_bot.render((line2 or "")[:44], True, TEXT_SECONDARY) if line2 else None
+    text_w = t1.get_width()
+    if t2:
+        text_w = max(text_w, t2.get_width())
+    inner_h = t1.get_height() + ((t2.get_height() + 2) if t2 else 0)
+    if hp_frac is not None and tier <= 1 and bar_h > 0:
+        inner_h += bar_h + (3 if tier == 0 else 2)
+
+    cw = max(int(min_w * k), text_w + pad_x * 2)
+    ch = max(int(min_h * k), inner_h + pad_y * 2)
+    ptr_h = max(5, int((9 if tier == 0 else 5 if tier == 1 else 4) * k))
+    notch = max(5, min(cw // 2 - 4, int(14 * k)))
+
+    cx = int(tip_x)
+    top_y = int(tip_y) - ptr_h - ch
+    rect = pygame.Rect(cx - cw // 2, top_y, cw, ch)
+    border_col = NAVY_CARD_OUTLINE_SEL if selected else accent
+    border_w = 2 if selected else 1
+
+    pmid = rect.bottom
+    pleft = (rect.left + notch, pmid)
+    pright = (rect.right - notch, pmid)
+    tip_pt = (int(tip_x), int(tip_y))
+    pygame.draw.polygon(surf, NAVY_CARD_FACE, [pleft, pright, tip_pt])
+    pygame.draw.polygon(surf, border_col, [pleft, pright, tip_pt], width=1)
+
+    pygame.draw.rect(surf, NAVY_CARD_FACE, rect, border_radius=radius)
+    strip_frac = 0.22 if tier == 1 else 0.36
+    strip_h = max(3 if tier == 1 else 5, int(ch * strip_frac))
+    strip = pygame.Rect(rect.left + 2, rect.top + 2, rect.w - 4, min(strip_h, rect.h - 4))
+    pygame.draw.rect(surf, NAVY_CARD_FACE_HI, strip, border_radius=max(1, radius - 2))
+    pygame.draw.line(surf, accent, (rect.left + 3, rect.top + 3), (rect.right - 3, rect.top + 3), 1)
+    pygame.draw.rect(surf, border_col, rect, width=border_w, border_radius=radius)
+
+    ty = rect.y + pad_y
+    surf.blit(t1, (rect.x + pad_x, ty))
+    ty += t1.get_height() + 1
+    if t2:
+        surf.blit(t2, (rect.x + pad_x, ty))
+        ty += t2.get_height() + 2
+    if hp_frac is not None and tier <= 1 and bar_h > 0:
+        bw = cw - pad_x * 2
+        bx = rect.x + pad_x
+        frac = max(0.0, min(1.0, hp_frac))
+        pygame.draw.rect(surf, NAVY_BAR_TROUGH, (bx, ty, bw, bar_h), border_radius=2)
+        if frac > 0:
+            fill_w = max(1, int(bw * frac))
+            col = ACCENT_GREEN if frac > 0.35 else TEXT_WARN if frac > 0.15 else ACCENT_RED
+            pygame.draw.rect(surf, col, (bx, ty, fill_w, bar_h), border_radius=2)
+
 
 def draw_entity_plate(surf: pygame.Surface, font: pygame.font.Font,
                       font_tiny: pygame.font.Font,
                       x: float, y: float, label: str, cls: str,
                       hp: float, max_hp: float, compact: bool = False) -> None:
-    pad = 4
-    line1 = f"{label}  {cls}"
-    w1 = font_tiny.render(line1, True, (210, 225, 235))
-    bar_w = 52 if compact else 64
+    """Legacy hook: same anchor semantics as before (y = point near top of ship)."""
     frac = max(0.0, min(1.0, hp / max_hp if max_hp > 0 else 0))
-    h_bar = 5
-    total_h = w1.get_height() + h_bar + pad * 2 + (0 if compact else 10)
-    bx = int(x - bar_w // 2 - pad)
-    by = int(y - total_h)
-    bw = bar_w + pad * 2
-    bg = pygame.Surface((bw, total_h), pygame.SRCALPHA)
-    pygame.draw.rect(bg, (8, 18, 28, 200), (0, 0, bw, total_h), border_radius=4)
-    pygame.draw.rect(bg, (40, 90, 80, 180), (0, 0, bw, total_h), width=1, border_radius=4)
-    surf.blit(bg, (bx, by))
-    surf.blit(w1, (bx + pad, by + pad))
-    bgy = by + pad + w1.get_height() + 2
-    pygame.draw.rect(surf, (30, 35, 40), (bx + pad, bgy, bar_w, h_bar), border_radius=2)
-    pygame.draw.rect(surf, (80, 200, 120), (bx + pad, bgy, int(bar_w * frac), h_bar), border_radius=2)
+    draw_navy_hud_card(
+        surf, x, y, 1.0,
+        tier=0,
+        line1=label if not compact else f"{label}  {cls}",
+        line2=None if compact else cls,
+        hp_frac=frac,
+        accent=NAVY_CARD_OUTLINE,
+        selected=False,
+        font_top=font_tiny,
+        font_bot=font_tiny,
+    )
 
-# ---------------------------------------------------------------------------
-# Strike craft tag
-# ---------------------------------------------------------------------------
 
 def draw_craft_tag(surf: pygame.Surface, font_micro: pygame.font.Font,
                    x: float, y: float, cls: str,
                    hp: float, max_hp: float) -> None:
-    pad = 2
-    short = cls[:3].upper()
-    w1 = font_micro.render(short, True, (170, 195, 215))
-    bar_w = 28
     frac = max(0.0, min(1.0, hp / max_hp if max_hp > 0 else 0))
-    h_bar = 3
-    total_h = w1.get_height() + h_bar + pad * 2
-    bx = int(x - bar_w // 2 - pad)
-    by = int(y - total_h - 2)
-    bw = bar_w + pad * 2
-    bg = pygame.Surface((bw, total_h), pygame.SRCALPHA)
-    pygame.draw.rect(bg, (6, 14, 22, 160), (0, 0, bw, total_h), border_radius=2)
-    pygame.draw.rect(bg, (35, 70, 60, 140), (0, 0, bw, total_h), width=1, border_radius=2)
-    surf.blit(bg, (bx, by))
-    surf.blit(w1, (bx + pad, by + pad))
-    bgy = by + pad + w1.get_height() + 1
-    pygame.draw.rect(surf, (28, 32, 38), (bx + pad, bgy, bar_w, h_bar), border_radius=1)
-    pygame.draw.rect(surf, (70, 160, 110), (bx + pad, bgy, int(bar_w * frac), h_bar), border_radius=1)
+    ab = craft_type_abbrev(cls)
+    draw_navy_hud_card(
+        surf, x, y, 1.0,
+        tier=1,
+        line1=ab,
+        line2=None,
+        hp_frac=frac,
+        accent=NAVY_CARD_OUTLINE,
+        selected=False,
+        font_top=font_micro,
+        font_bot=font_micro,
+    )
 
 # ---------------------------------------------------------------------------
 # Missiles (ordnance diamond style)
@@ -381,7 +461,7 @@ def draw_missile(surf: pygame.Surface, m: Missile,
     ]
     flicker = 0.92 + 0.08 * math.sin(m.anim_t * 22.0)
     ac_l = tuple(min(255, int(ch * flicker)) for ch in ac)
-    pygame.draw.polygon(surf, (0, 0, 0), pts)
+    pygame.draw.polygon(surf, NAVY_GLYPH_FILL, pts)
     pygame.draw.polygon(surf, ac_l, pts, width=max(1, int(1.15 * sc)))
     wx = int(x - ca * r_a * 1.05)
     wy = int(y - sa * r_a * 1.05)
@@ -390,15 +470,20 @@ def draw_missile(surf: pygame.Surface, m: Missile,
     dim = (ac_l[0] // 2 + 30, ac_l[1] // 2 + 25, ac_l[2] // 2 + 35)
     pygame.draw.line(surf, dim, (wx, wy), (wx2, wy2), max(1, int(sc)))
     if font_micro is not None:
-        label = font_micro.render(abbrev, True, ac_l)
-        bw = label.get_width() + 4
-        bh = label.get_height() + 4
-        bx, by_l = int(x - bw // 2), int(y + r_b + 5)
-        bg = pygame.Surface((bw, bh), pygame.SRCALPHA)
-        pygame.draw.rect(bg, (18, 12, 24, 200), (0, 0, bw, bh), border_radius=2)
-        pygame.draw.rect(bg, (72, 48, 98, 220), (0, 0, bw, bh), width=1, border_radius=2)
-        surf.blit(bg, (bx, by_l))
-        surf.blit(label, (bx + 2, by_l + 2))
+        back = max(14.0, r_a + 10.0 * sc)
+        tcx = x - ca * back
+        tcy = y - sa * back
+        draw_navy_hud_card(
+            surf, tcx, tcy, sc,
+            tier=2,
+            line1=abbrev,
+            line2=None,
+            hp_frac=None,
+            accent=ac_l,
+            selected=False,
+            font_top=font_micro,
+            font_bot=font_micro,
+        )
 
 # ---------------------------------------------------------------------------
 # Ballistics
@@ -500,6 +585,202 @@ def draw_attack_focus_rings(surf: pygame.Surface, groups: List[Group],
         if rr > 12:
             pygame.draw.circle(surf, (255, 200, 140), (int(sx), int(sy)), max(10, rr - 8), width=2)
 
+
+# ---------------------------------------------------------------------------
+# Unit intent (movement paths, attack beams, selection formation bracket)
+# ---------------------------------------------------------------------------
+
+_INTENT_MOVE_PLAYER = (72, 118, 152)
+_INTENT_MOVE_ENEMY = (120, 72, 78)
+_INTENT_ATTACK = (220, 95, 88)
+_INTENT_RALLY = (95, 165, 145)
+_INTENT_BRACKET = (210, 185, 95)
+
+
+def _intent_line(
+    surf: pygame.Surface,
+    ax: float,
+    ay: float,
+    az: float,
+    bx: float,
+    by: float,
+    bz: float,
+    cam_x: float,
+    cam_y: float,
+    color: Tuple[int, int, int],
+    width: int = 1,
+) -> None:
+    x0, y0, _ = world_to_screen(ax, ay, az, cam_x, cam_y)
+    x1, y1, _ = world_to_screen(bx, by, bz, cam_x, cam_y)
+    if max(x0, x1) < -40 or min(x0, x1) > VIEW_W + 40:
+        return
+    if max(y0, y1) < -40 or min(y0, y1) > VIEW_H + 40:
+        return
+    pygame.draw.line(surf, color, (int(x0), int(y0)), (int(x1), int(y1)), width)
+
+
+def draw_movement_intent_lines(
+    surf: pygame.Surface,
+    groups: List[Group],
+    cam_x: float,
+    cam_y: float,
+    fog: Optional[FogState],
+    *,
+    in_combat: bool,
+) -> None:
+    if not in_combat:
+        return
+    for g in groups:
+        if g.dead or not g.render_capital or not g.waypoint:
+            continue
+        wx, wy = g.waypoint
+        if g.side == "player":
+            if fog is not None and not fog_cell_visible(fog, g.x, g.y):
+                continue
+            if fog is not None and not fog_cell_visible(fog, wx, wy):
+                continue
+            _intent_line(surf, g.x, g.y, g.z, wx, wy, g.z, cam_x, cam_y, _INTENT_MOVE_PLAYER, 1)
+        else:
+            if fog is not None and (
+                not fog_cell_visible(fog, g.x, g.y)
+                or not fog_cell_visible(fog, wx, wy)
+            ):
+                continue
+            _intent_line(surf, g.x, g.y, g.z, wx, wy, g.z, cam_x, cam_y, _INTENT_MOVE_ENEMY, 1)
+
+
+def draw_strike_rally_intent_lines(
+    surf: pygame.Surface,
+    crafts: List[Craft],
+    cam_x: float,
+    cam_y: float,
+    fog: Optional[FogState],
+    *,
+    in_combat: bool,
+) -> None:
+    if not in_combat:
+        return
+    for c in crafts:
+        if c.dead or c.side != "player":
+            continue
+        if fog is not None and not fog_cell_visible(fog, c.x, c.y):
+            continue
+        wings = getattr(c.parent, "strike_rally_wings", None)
+        if not wings or c.squadron_index >= len(wings):
+            continue
+        rp = wings[c.squadron_index]
+        if rp is None:
+            continue
+        wpx, wpy = float(rp[0]), float(rp[1])
+        if fog is not None and not fog_cell_visible(fog, wpx, wpy):
+            continue
+        _intent_line(surf, c.x, c.y, c.z, wpx, wpy, c.z, cam_x, cam_y, _INTENT_RALLY, 1)
+
+
+def draw_attack_intent_beams(
+    surf: pygame.Surface,
+    groups: List[Group],
+    crafts: List[Craft],
+    cam_x: float,
+    cam_y: float,
+    fog: Optional[FogState],
+    mission: Any,
+    *,
+    in_combat: bool,
+) -> None:
+    if not in_combat:
+        return
+    mpv = bool(getattr(mission, "mp_pvp", False)) if mission is not None else False
+    for g in groups:
+        if g.side != "player" or g.dead or not g.render_capital:
+            continue
+        t = g.attack_target
+        if not is_valid_attack_focus_for_side(
+            "player",
+            t,
+            attacker_owner=getattr(g, "owner_id", None),
+            mp_pvp=mpv,
+        ):
+            continue
+        if fog is not None and not fog_cell_visible(fog, g.x, g.y):
+            continue
+        tz = t.z if isinstance(t, GroundObjective) else getattr(t, "z", 35.0)
+        if fog is not None and not fog_cell_visible(fog, t.x, t.y):
+            continue
+        _intent_line(surf, g.x, g.y, g.z, t.x, t.y, tz, cam_x, cam_y, _INTENT_ATTACK, 1)
+
+    for c in crafts:
+        if c.dead or c.side != "player":
+            continue
+        p = c.parent
+        if p.dead:
+            continue
+        t = getattr(p, "strike_focus_target", None)
+        owner = getattr(c, "owner_id", None) or getattr(p, "owner_id", None)
+        if not is_valid_attack_focus_for_side(
+            "player", t, attacker_owner=owner, mp_pvp=mpv
+        ):
+            continue
+        if fog is not None and not fog_cell_visible(fog, c.x, c.y):
+            continue
+        tz = t.z if isinstance(t, GroundObjective) else getattr(t, "z", 35.0)
+        if fog is not None and not fog_cell_visible(fog, t.x, t.y):
+            continue
+        _intent_line(surf, c.x, c.y, c.z, t.x, t.y, tz, cam_x, cam_y, _INTENT_ATTACK, 1)
+
+
+def draw_selection_formation_bracket(
+    surf: pygame.Surface,
+    groups: List[Group],
+    cam_x: float,
+    cam_y: float,
+    fog: Optional[FogState],
+    *,
+    in_combat: bool,
+) -> None:
+    if not in_combat:
+        return
+    sel = [
+        g
+        for g in groups
+        if g.side == "player" and not g.dead and g.render_capital and g.selected
+    ]
+    if not sel:
+        return
+    xs: List[float] = []
+    ys: List[float] = []
+    for g in sel:
+        if fog is not None and not fog_cell_visible(fog, g.x, g.y):
+            continue
+        sx, sy, sc = world_to_screen(g.x, g.y, g.z, cam_x, cam_y)
+        cls_sc = CAPITAL_MARKER_CLASS_SCALE.get(g.class_name, 1.0)
+        r = max(20.0, 30.0 * cls_sc * sc)
+        xs.extend([sx - r, sx + r])
+        ys.extend([sy - r, sy + r])
+    if len(xs) < 2:
+        return
+    pad = 10.0
+    left = int(min(xs) - pad)
+    right = int(max(xs) + pad)
+    top = int(min(ys) - pad)
+    bottom = int(max(ys) + pad)
+    col = _INTENT_BRACKET
+    ln = 14
+    w = 2
+    # Top-left
+    pygame.draw.line(surf, col, (left, top), (left + ln, top), w)
+    pygame.draw.line(surf, col, (left, top), (left, top + ln), w)
+    # Top-right
+    pygame.draw.line(surf, col, (right, top), (right - ln, top), w)
+    pygame.draw.line(surf, col, (right, top), (right, top + ln), w)
+    # Bottom-left
+    pygame.draw.line(surf, col, (left, bottom), (left + ln, bottom), w)
+    pygame.draw.line(surf, col, (left, bottom), (left, bottom - ln), w)
+    # Bottom-right
+    pygame.draw.line(surf, col, (right, bottom), (right - ln, bottom), w)
+    pygame.draw.line(surf, col, (right, bottom), (right, bottom - ln), w)
+
+
 # ---------------------------------------------------------------------------
 # Salvage pods
 # ---------------------------------------------------------------------------
@@ -587,6 +868,29 @@ def draw_progress_bar(surf: pygame.Surface, rect: pygame.Rect,
     if fill_w > 0:
         pygame.draw.rect(surf, color, pygame.Rect(rect.x, rect.y, fill_w, rect.h), border_radius=3)
 
+
+def draw_pd_stress_badge(
+    surf: pygame.Surface,
+    font: pygame.font.Font,
+    sx: float,
+    sy: float,
+    sc: float,
+    stress_ratio: float,
+) -> None:
+    """Small 'PD' label under the hull marker; green→yellow→red from combat_ordnance stress."""
+    level = pd_stress_display_level(stress_ratio)
+    col = pd_stress_color(level)
+    off = int(20 * sc)
+    x0 = int(sx)
+    y0 = int(sy + off)
+    label = "PD"
+    for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        sh = font.render(label, True, (10, 16, 26))
+        surf.blit(sh, (x0 - sh.get_width() // 2 + ox, y0 + oy))
+    txt = font.render(label, True, col)
+    surf.blit(txt, (x0 - txt.get_width() // 2, y0))
+
+
 # ---------------------------------------------------------------------------
 # Composite: draw the full battle world (background + entities + fog)
 # Used by CombatScene and DebriefScene.
@@ -596,6 +900,8 @@ def draw_battle_world(surf: pygame.Surface, gs: Any, show_fog: bool = True) -> N
     """Render the complete battlefield onto *surf* (VIEW_W x VIEW_H region)."""
     cam_x, cam_y = gs.camera.cam_x, gs.camera.cam_y
     fog = gs.combat.fog
+    in_combat = getattr(gs.round, "phase", "") == "combat"
+    pd_mult = gs.combat.pd_rof_mult[0] if gs.combat.pd_rof_mult else 1.0
 
     surf.fill(BG_DEEP)
     draw_starfield(surf, gs.stars, cam_x, cam_y, VIEW_W, VIEW_H)
@@ -604,6 +910,13 @@ def draw_battle_world(surf: pygame.Surface, gs: Any, show_fog: bool = True) -> N
     draw_asteroids(surf, gs.battle_obstacles, cam_x, cam_y, fog)
     draw_objective(surf, gs.fonts.tiny, gs.combat.mission, cam_x, cam_y, fog)
     draw_salvage_pods(surf, gs.combat.mission, cam_x, cam_y, fog)
+
+    draw_movement_intent_lines(
+        surf, gs.combat.groups, cam_x, cam_y, fog, in_combat=in_combat
+    )
+    draw_strike_rally_intent_lines(
+        surf, gs.combat.crafts, cam_x, cam_y, fog, in_combat=in_combat
+    )
 
     for b in gs.combat.ballistics:
         draw_ballistic(surf, b, cam_x, cam_y)
@@ -626,10 +939,25 @@ def draw_battle_world(surf: pygame.Surface, gs: Any, show_fog: bool = True) -> N
         else:
             col = player_unit_color(g.color_id)
         if g.render_capital:
-            draw_capital(surf, sx, sy, col, heading_for_group(g), cls_sc * sc)
-            draw_entity_plate(surf, gs.fonts.main, gs.fonts.tiny,
-                              sx, sy - int(16 * sc), g.label, g.class_name,
-                              g.hp, g.max_hp, compact=len(gs.combat.groups) > 8)
+            hdg = heading_for_group(g)
+            draw_capital(surf, sx, sy, col, hdg, cls_sc * sc)
+            tip_y = sy - max(8.0, 9.0 * cls_sc * sc)
+            compact = len(gs.combat.groups) > 8
+            draw_navy_hud_card(
+                surf, sx, tip_y, sc,
+                tier=0,
+                line1=g.label if not compact else f"{g.label}  {g.class_name}",
+                line2=None if compact else g.class_name,
+                hp_frac=max(0.0, min(1.0, g.hp / g.max_hp if g.max_hp > 0 else 0.0)),
+                accent=col,
+                selected=g.selected,
+                font_top=gs.fonts.tiny,
+                font_bot=gs.fonts.micro,
+            )
+            if in_combat and gs.fonts.micro is not None:
+                pr = compute_pd_stress_ratio(gs.data, g, gs.combat.missiles, pd_mult)
+                if pr is not None:
+                    draw_pd_stress_badge(surf, gs.fonts.micro, sx, sy, sc, pr)
         if g.selected and g.render_capital:
             pygame.draw.circle(surf, SELECT_YELLOW, (int(sx), int(sy)),
                                max(16, int(28 * cls_sc * sc)), width=1)
@@ -645,9 +973,36 @@ def draw_battle_world(surf: pygame.Surface, gs: Any, show_fog: bool = True) -> N
         else:
             col = player_unit_color(c.color_id, for_craft=True)
         draw_craft(surf, sx, sy, col, c.heading, 6.5 * sc)
+        tip_cy = sy - max(5.0, 6.2 * sc)
+        draw_navy_hud_card(
+            surf, sx, tip_cy, sc,
+            tier=1,
+            line1=craft_type_abbrev(c.class_name),
+            line2=None,
+            hp_frac=max(0.0, min(1.0, c.hp / c.max_hp if c.max_hp > 0 else 0.0)),
+            accent=col,
+            selected=c.selected,
+            font_top=gs.fonts.micro,
+            font_bot=gs.fonts.micro,
+        )
+        if in_combat and gs.fonts.micro is not None:
+            pr = compute_pd_stress_ratio(gs.data, c, gs.combat.missiles, pd_mult)
+            if pr is not None:
+                draw_pd_stress_badge(surf, gs.fonts.micro, sx, sy, sc, pr)
         if c.selected:
             pygame.draw.circle(surf, (255, 240, 140), (int(sx), int(sy)),
                                max(6, int(10 * sc)), width=2)
+
+    draw_attack_intent_beams(
+        surf,
+        gs.combat.groups,
+        gs.combat.crafts,
+        cam_x,
+        cam_y,
+        fog,
+        gs.combat.mission,
+        in_combat=in_combat,
+    )
 
     if show_fog:
         draw_fog_overlay(surf, fog, cam_x, cam_y)
@@ -656,6 +1011,9 @@ def draw_battle_world(surf: pygame.Surface, gs: Any, show_fog: bool = True) -> N
     draw_sensor_ghosts(surf, gs.fonts.tiny, gs.combat.seeker_ghosts, cam_x, cam_y)
     draw_active_pings(surf, gs.combat.active_pings, cam_x, cam_y)
     draw_attack_focus_rings(surf, gs.combat.groups, cam_x, cam_y, fog)
+    draw_selection_formation_bracket(
+        surf, gs.combat.groups, cam_x, cam_y, fog, in_combat=in_combat
+    )
 
 
 # ---------------------------------------------------------------------------

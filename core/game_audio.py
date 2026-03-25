@@ -1,12 +1,13 @@
 """
 Loads MP3s from assets/sound and plays combat feedback.
+Announcer: pre-rendered clips in assets/sound/voice/<line_id>.wav (see tools/generate_announcer_voice.py).
 Low-HP alarm: short bursts (capped at LOW_HP_ALARM_MAX_MS) so long files stay tolerable — trim the asset to ~2s for best results.
 """
 from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pygame
 
@@ -15,9 +16,10 @@ try:
 except ImportError:
     from core.bundle_paths import assets_sound_dir
 
-from runtime_tts import RuntimeTTS
-
 ASSETS_SOUND = assets_sound_dir()
+VOICE_SUBDIR = "voice"
+# Blends with SFX; scaled again by master_volume on the voice channel.
+VOICE_CLIP_VOLUME = 0.78
 
 LOW_HP_FRACTION = 0.28
 LOW_HP_ALARM_MAX_MS = 2000
@@ -30,7 +32,7 @@ class GameAudio:
         # Multiplier 0..1 applied to SFX channels (set in apply_master_volume).
         self.master_volume: float = 1.0
         self.tts_voice_enabled: bool = True
-        self._tts: Optional[RuntimeTTS] = None
+        self._voice_sounds: Dict[str, pygame.mixer.Sound] = {}
         self.warning_low_hp: Optional[pygame.mixer.Sound] = None
         self.ship_destroyed: List[pygame.mixer.Sound] = []
         self.positive_tone: Optional[pygame.mixer.Sound] = None
@@ -38,12 +40,11 @@ class GameAudio:
         self._fx_ch = pygame.mixer.Channel(0)
         self._warn_ch = pygame.mixer.Channel(1)
         self._ui_ch = pygame.mixer.Channel(2)
+        self._voice_ch = pygame.mixer.Channel(3)
         self._last_warn_burst_end: int = -999999
         self._warn_burst_start: int = 0
 
     def init(self) -> None:
-        self._tts = RuntimeTTS()
-        self._tts.start()
         try:
             pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
         except pygame.error:
@@ -52,6 +53,7 @@ class GameAudio:
 
         self.ok = True
         self.apply_master_volume()
+        self._load_voice_clips()
         warn_path = ASSETS_SOUND / "warning_low_health.mp3"
         if warn_path.is_file():
             try:
@@ -85,6 +87,22 @@ class GameAudio:
             except Exception:
                 pass
 
+    def _load_voice_clips(self) -> None:
+        if not self.ok:
+            return
+        d = ASSETS_SOUND / VOICE_SUBDIR
+        if not d.is_dir():
+            return
+        for p in sorted(d.iterdir()):
+            if p.suffix.lower() not in (".wav", ".mp3", ".ogg"):
+                continue
+            try:
+                s = pygame.mixer.Sound(str(p))
+                s.set_volume(VOICE_CLIP_VOLUME)
+                self._voice_sounds[p.stem] = s
+            except Exception:
+                pass
+
     def apply_master_volume(self) -> None:
         """Apply master_volume to reserved mixer channels (call after init or when the slider changes)."""
         if not self.ok:
@@ -94,13 +112,12 @@ class GameAudio:
             self._fx_ch.set_volume(v)
             self._warn_ch.set_volume(v)
             self._ui_ch.set_volume(v)
+            self._voice_ch.set_volume(v)
         except Exception:
             pass
 
     def shutdown(self) -> None:
-        if self._tts is not None:
-            self._tts.shutdown()
-            self._tts = None
+        self._voice_sounds.clear()
         if self.ok:
             try:
                 pygame.mixer.quit()
@@ -108,11 +125,18 @@ class GameAudio:
                 pass
             self.ok = False
 
-    def speak_voice(self, text: str) -> None:
-        if not self.tts_voice_enabled:
+    def speak_voice(self, line_id: str) -> None:
+        """Play a pre-baked announcer clip: assets/sound/voice/<line_id>.wav (or .mp3/.ogg)."""
+        if not self.tts_voice_enabled or not self.ok:
             return
-        if self._tts is not None:
-            self._tts.speak(text)
+        lid = line_id.strip()
+        if not lid:
+            return
+        snd = self._voice_sounds.get(lid)
+        if snd is None:
+            return
+        self._voice_ch.stop()
+        self._voice_ch.play(snd)
 
     def play_ship_destroyed(self) -> None:
         if not self.ok or not self.ship_destroyed:
