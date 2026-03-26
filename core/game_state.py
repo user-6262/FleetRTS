@@ -132,6 +132,11 @@ class MpState:
     hub_last_ok_ms: int = 0
     remote_lobby_id: Optional[str] = None
     remote_lobby_short: Optional[str] = None
+    # Exact string in HTTP lobby players[] for leave_lobby (stable if relay renames display).
+    http_lobby_player_name: Optional[str] = None
+    # From last create/join lobby.relay; None uses FLEETRTS_RELAY_* env in client.
+    relay_host: Optional[str] = None
+    relay_port: Optional[int] = None
     remote_lobby_http_players: List[str] = field(default_factory=list)
     remote_relay_players: List[str] = field(default_factory=list)
     relay: Optional[Any] = None

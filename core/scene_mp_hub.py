@@ -12,7 +12,7 @@ from draw import (
     BTN_FILL, BTN_FILL_HOT, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DIM,
     TEXT_ACCENT, TEXT_WARN, ACCENT_GREEN,
     WIDTH, HEIGHT,
-    draw_starfield, draw_world_edge, draw_panel, draw_button, draw_text_field,
+    blit_menu_background, draw_panel, draw_button, draw_text_field,
 )
 from scenes import RunContext
 
@@ -23,6 +23,32 @@ LIST_X = 80
 LIST_Y = 160
 LIST_W = WIDTH - 160
 MAX_VISIBLE = 12
+
+
+def _apply_lobby_session_from_http(gs: Any, lobby: Dict[str, Any], *, joined_as: Optional[str] = None) -> None:
+    """Set relay endpoint and authority from HTTP lobby payload (matches demo_game.connect_relay)."""
+    gs.mp.remote_lobby_id = lobby.get("lobby_id") or lobby.get("id")
+    gs.mp.remote_lobby_short = lobby.get("short_id")
+    rel = lobby.get("relay") if isinstance(lobby.get("relay"), dict) else {}
+    h = rel.get("host")
+    gs.mp.relay_host = str(h).strip() if h else None
+    p = rel.get("port")
+    if p is not None:
+        try:
+            gs.mp.relay_port = int(p)
+        except (TypeError, ValueError):
+            gs.mp.relay_port = None
+    else:
+        gs.mp.relay_port = None
+    au = lobby.get("authoritative")
+    gs.mp.lobby_authoritative = str(au) if au in ("player", "dedicated") else "player"
+    pl = lobby.get("players")
+    if joined_as is not None:
+        gs.mp.http_lobby_player_name = str(joined_as)[:64]
+    elif isinstance(pl, list) and pl:
+        gs.mp.http_lobby_player_name = str(pl[0])[:64]
+    else:
+        gs.mp.http_lobby_player_name = (gs.mp.player_name or "Player")[:64]
 
 
 def _http_available(gs: Any) -> bool:
@@ -49,6 +75,14 @@ class MpHubScene:
     def __init__(self) -> None:
         self._hover: Optional[str] = None
         self._list_thread: Optional[threading.Thread] = None
+        self._cache_title: Optional[pygame.Surface] = None
+        self._cache_hint: Optional[pygame.Surface] = None
+        self._cache_hdr: Optional[pygame.Surface] = None
+        self._cache_nl: Optional[pygame.Surface] = None
+        self._cache_jl: Optional[pygame.Surface] = None
+        self._cache_empty: Optional[pygame.Surface] = None
+        self._cache_status_key: Optional[tuple[str, tuple[int, int, int]]] = None
+        self._cache_status: Optional[pygame.Surface] = None
 
     def update(self, dt: float, gs: Any, ctx: RunContext) -> Optional[str]:
         if not _http_available(gs):
@@ -121,7 +155,9 @@ class MpHubScene:
                 r = pygame.Rect(LIST_X, LIST_Y + i * (ROW_H + ROW_GAP), LIST_W, ROW_H)
                 if r.collidepoint(mx, my):
                     row = gs.mp.hub_lobby_rows[gs.mp.hub_lobby_scroll + i]
-                    gs.mp.join_id_buffer = str(row.get("short_id", row.get("lobby_id", "")))
+                    gs.mp.join_id_buffer = str(
+                        row.get("short_id") or row.get("id") or row.get("lobby_id") or ""
+                    )
                     gs.audio.play_positive()
                     break
 
@@ -167,8 +203,7 @@ class MpHubScene:
                 as_player=gs.mp.player_name,
                 authoritative=gs.mp.http_authority_choice,
             )
-            gs.mp.remote_lobby_id = lobby.get("lobby_id")
-            gs.mp.remote_lobby_short = lobby.get("short_id")
+            _apply_lobby_session_from_http(gs, lobby)
             gs.mp.lobby_host = True
             gs.mp.ready = False
             gs.mp.chat_log = [f"Lobby created: {gs.mp.remote_lobby_short}"]
@@ -184,11 +219,10 @@ class MpHubScene:
             try:
                 lobby_info = get_lobby_by_short_id(gs.mp.fleet_http_base, sid)
             except Exception:
-                lobby_info = {"lobby_id": sid}
-            lid = lobby_info.get("lobby_id", sid)
+                lobby_info = {"id": sid}
+            lid = str(lobby_info.get("lobby_id") or lobby_info.get("id") or sid).strip()
             lobby, joined_as = join_lobby(gs.mp.fleet_http_base, lid, gs.mp.player_name)
-            gs.mp.remote_lobby_id = lobby.get("lobby_id")
-            gs.mp.remote_lobby_short = lobby.get("short_id")
+            _apply_lobby_session_from_http(gs, lobby, joined_as=joined_as)
             gs.mp.player_name = joined_as
             gs.mp.name_buffer = joined_as
             gs.mp.lobby_host = False
@@ -200,35 +234,42 @@ class MpHubScene:
         return "mp_lobby"
 
     def draw(self, screen: pygame.Surface, gs: Any, ctx: RunContext) -> None:
-        screen.fill(BG_DEEP)
-        draw_starfield(screen, gs.stars, gs.camera.cam_x, gs.camera.cam_y, WIDTH, HEIGHT)
-        draw_world_edge(screen, gs.camera.cam_x, gs.camera.cam_y)
+        blit_menu_background(screen, WIDTH, HEIGHT)
 
-        title = gs.fonts.big.render("MULTIPLAYER", True, TEXT_ACCENT)
+        if self._cache_title is None:
+            self._cache_title = gs.fonts.big.render("MULTIPLAYER", True, TEXT_ACCENT)
+        title = self._cache_title
         screen.blit(title, (LIST_X, 20))
 
         status_col = ACCENT_GREEN if gs.mp.hub_svc_state == "online" else TEXT_WARN
         status_text = gs.mp.hub_svc_state.upper()
-        st = gs.fonts.tiny.render(f"Server: {status_text}", True, status_col)
-        screen.blit(st, (LIST_X + title.get_width() + 20, 26))
+        sk = (status_text, status_col)
+        if self._cache_status is None or self._cache_status_key != sk:
+            self._cache_status_key = sk
+            self._cache_status = gs.fonts.tiny.render(f"Server: {status_text}", True, status_col)
+        screen.blit(self._cache_status, (LIST_X + title.get_width() + 20, 26))
 
         # Name + join ID fields
-        nl = gs.fonts.tiny.render("Player name:", True, TEXT_SECONDARY)
-        screen.blit(nl, (LIST_X, 82))
+        if self._cache_nl is None:
+            self._cache_nl = gs.fonts.tiny.render("Player name:", True, TEXT_SECONDARY)
+        screen.blit(self._cache_nl, (LIST_X, 82))
         draw_text_field(screen, _name_rect(), gs.mp.name_buffer, gs.fonts.main,
                         active=gs.mp.name_focus, placeholder="Player")
-        jl = gs.fonts.tiny.render("Join code:", True, TEXT_SECONDARY)
-        screen.blit(jl, (LIST_X + 300, 82))
+        if self._cache_jl is None:
+            self._cache_jl = gs.fonts.tiny.render("Join code:", True, TEXT_SECONDARY)
+        screen.blit(self._cache_jl, (LIST_X + 300, 82))
         draw_text_field(screen, _join_id_rect(), gs.mp.join_id_buffer, gs.fonts.main,
                         active=gs.mp.join_focus, placeholder="lobby ID")
 
         # Lobby list header
-        hdr = gs.fonts.main.render("OPEN LOBBIES", True, TEXT_ACCENT)
-        screen.blit(hdr, (LIST_X, LIST_Y - 28))
+        if self._cache_hdr is None:
+            self._cache_hdr = gs.fonts.main.render("OPEN LOBBIES", True, TEXT_ACCENT)
+        screen.blit(self._cache_hdr, (LIST_X, LIST_Y - 28))
         if not gs.mp.hub_lobby_rows:
-            empty = gs.fonts.tiny.render(
-                "No lobbies found. Host one or enter a join code.", True, TEXT_DIM)
-            screen.blit(empty, (LIST_X, LIST_Y + 8))
+            if self._cache_empty is None:
+                self._cache_empty = gs.fonts.tiny.render(
+                    "No lobbies found. Host one or enter a join code.", True, TEXT_DIM)
+            screen.blit(self._cache_empty, (LIST_X, LIST_Y + 8))
         else:
             visible = gs.mp.hub_lobby_rows[gs.mp.hub_lobby_scroll:
                                             gs.mp.hub_lobby_scroll + MAX_VISIBLE]
@@ -256,7 +297,9 @@ class MpHubScene:
         draw_button(screen, _join_rect(), "Join", gs.fonts.main,
                     hot=self._hover == "join")
 
-        hint = gs.fonts.micro.render(
-            "ESC -- back  |  Click lobby row to fill join code  |  ENTER in join field to connect",
-            True, TEXT_DIM)
+        if self._cache_hint is None:
+            self._cache_hint = gs.fonts.micro.render(
+                "ESC -- back  |  Click lobby row to fill join code  |  ENTER in join field to connect",
+                True, TEXT_DIM)
+        hint = self._cache_hint
         screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, HEIGHT - 20))

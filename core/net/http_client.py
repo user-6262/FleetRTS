@@ -123,7 +123,7 @@ def get_lobby_by_short_id(base_url: str, short_id: str) -> Dict[str, Any]:
 
 def list_lobbies(base_url: str) -> List[Dict[str, Any]]:
     base = base_url.rstrip("/")
-    # Short timeout: this runs on the pygame main thread during MP hub refresh.
+    # Short timeout: safe to call from a worker thread (e.g. MpHubScene list poll).
     out = _get_json(f"{base}/api/v1/lobbies", timeout=4)
     if not isinstance(out, dict) or "lobbies" not in out:
         raise FleetHttpError("unexpected response from list lobbies")

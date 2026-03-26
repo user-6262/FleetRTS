@@ -16,7 +16,7 @@ from draw import (
     BTN_FILL, BTN_FILL_HOT, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_DIM,
     TEXT_ACCENT, TEXT_WARN, ACCENT_GREEN, ACCENT_RED,
     WIDTH, HEIGHT,
-    draw_starfield, draw_world_edge, draw_panel, draw_button, draw_text_field,
+    blit_menu_background, draw_panel, draw_button, draw_text_field,
 )
 from scenes import RunContext
 
@@ -49,6 +49,17 @@ class MpLobbyScene:
     def __init__(self) -> None:
         self._hover: Optional[str] = None
         self._relay_connected = False
+        self._title_short: Optional[str] = None
+        self._title_surf: Optional[pygame.Surface] = None
+        self._cache_players_label: Optional[pygame.Surface] = None
+        self._cache_chat_hdr: Optional[pygame.Surface] = None
+        self._cache_settings_hdr: Optional[pygame.Surface] = None
+        self._cache_hint: Optional[pygame.Surface] = None
+        self._pl_snapshot: Optional[tuple] = None
+        self._pl_rows_main: List[pygame.Surface] = []
+        self._pl_rows_ready: List[pygame.Surface] = []
+        self._chat_key: tuple[str, ...] = ()
+        self._chat_surfs: List[pygame.Surface] = []
 
     def _back_rect(self) -> pygame.Rect:
         return pygame.Rect(20, HEIGHT - 70, 120, 48)
@@ -73,13 +84,32 @@ class MpLobbyScene:
             for msg in msgs:
                 mt = msg.get("t", "")
                 if mt == "joined":
+                    you = msg.get("you")
+                    prev_players = gs.mp.remote_relay_players
+                    prev_n = len(prev_players)
+                    if isinstance(you, str) and you.strip():
+                        new_n = you.strip()[:64]
+                        old_n = gs.mp.player_name
+                        if new_n != old_n:
+                            if old_n in gs.mp.player_fleet_designs:
+                                gs.mp.player_fleet_designs[new_n] = gs.mp.player_fleet_designs.pop(
+                                    old_n)
+                            if old_n in gs.mp.remote_player_colors:
+                                gs.mp.remote_player_colors[new_n] = gs.mp.remote_player_colors.pop(
+                                    old_n)
+                        gs.mp.player_name = new_n
+                        gs.mp.name_buffer = new_n
                     gs.mp.remote_relay_players = list(msg.get("players") or [])
-                    gs.mp.relay.send_payload(lobby_ready(gs.mp.ready))
-                    gs.mp.relay.send_payload(lobby_presence(
-                        in_fleet_design=False, color_id=gs.mp.player_color_id))
-                    design = self._my_fleet_design(gs)
-                    if design:
-                        gs.mp.relay.send_payload(lobby_loadout(payload={"fleet": design}))
+                    new_n_players = len(gs.mp.remote_relay_players)
+                    # Only our first join or when someone new enters needs a full state push.
+                    announce = bool(you and str(you).strip()) or new_n_players > prev_n
+                    if announce:
+                        gs.mp.relay.send_payload(lobby_ready(gs.mp.ready))
+                        gs.mp.relay.send_payload(lobby_presence(
+                            in_fleet_design=False, color_id=gs.mp.player_color_id))
+                        design = self._my_fleet_design(gs)
+                        if design:
+                            gs.mp.relay.send_payload(lobby_loadout(payload={"fleet": design}))
                 elif mt == "peer_left":
                     gs.mp.remote_relay_players = list(msg.get("players") or [])
                     left = str(msg.get("player") or "")
@@ -158,17 +188,58 @@ class MpLobbyScene:
             from net.relay_client import RelayClient
         except ImportError:
             from core.net.relay_client import RelayClient
-        host = os.environ.get("FLEETRTS_RELAY_HOST", "127.0.0.1")
-        port = int(os.environ.get("FLEETRTS_RELAY_PORT", str(RELAY_DEFAULT_PORT)))
-        gs.mp.relay = RelayClient(host, port, gs.mp.remote_lobby_id, gs.mp.player_name)
+        rh = (gs.mp.relay_host or "").strip() or os.environ.get(
+            "FLEETRTS_RELAY_HOST", "127.0.0.1")
+        if gs.mp.relay_port is not None:
+            try:
+                rp = int(gs.mp.relay_port)
+            except (TypeError, ValueError):
+                rp = int(os.environ.get("FLEETRTS_RELAY_PORT", str(RELAY_DEFAULT_PORT)))
+        else:
+            rp = int(os.environ.get("FLEETRTS_RELAY_PORT", str(RELAY_DEFAULT_PORT)))
+        gs.mp.relay = RelayClient(rh, rp, str(gs.mp.remote_lobby_id or ""), gs.mp.player_name)
         gs.mp.relay.connect()
         self._relay_connected = True
 
     def _disconnect(self, gs: Any) -> None:
+        base = gs.mp.fleet_http_base
+        lid = gs.mp.remote_lobby_id
+        leave_name = (gs.mp.http_lobby_player_name or gs.mp.player_name or "").strip()
+        if base and lid and leave_name:
+            try:
+                from net.http_client import leave_lobby
+            except ImportError:
+                from core.net.http_client import leave_lobby
+            try:
+                leave_lobby(base, str(lid), leave_name)
+            except Exception:
+                pass
         if gs.mp.relay:
             gs.mp.relay.close()
             gs.mp.relay = None
         self._relay_connected = False
+        gs.mp.remote_lobby_id = None
+        gs.mp.remote_lobby_short = None
+        gs.mp.relay_host = None
+        gs.mp.relay_port = None
+        gs.mp.http_lobby_player_name = None
+        gs.mp.remote_relay_players.clear()
+        gs.mp.remote_ready.clear()
+        gs.mp.player_fleet_designs.clear()
+        gs.mp.remote_player_colors.clear()
+        gs.mp.chat_log.clear()
+        gs.mp.chat_input = ""
+        gs.mp.chat_focus = False
+        gs.mp.net_err = None
+        gs.mp.ready = False
+        gs.mp.match_generation = 0
+        gs.mp.applied_remote_start_gen = 0
+        self._title_short = None
+        self._title_surf = None
+        self._pl_snapshot = None
+        self._pl_rows_main = []
+        self._pl_rows_ready = []
+        self._chat_key = ()
 
     # ── fleet design helpers ────────────────────────────────────────────────
 
@@ -354,12 +425,13 @@ class MpLobbyScene:
     # ── draw ────────────────────────────────────────────────────────────────
 
     def draw(self, screen: pygame.Surface, gs: Any, ctx: RunContext) -> None:
-        screen.fill(BG_DEEP)
-        draw_starfield(screen, gs.stars, gs.camera.cam_x, gs.camera.cam_y, WIDTH, HEIGHT)
+        blit_menu_background(screen, WIDTH, HEIGHT)
 
         short = gs.mp.remote_lobby_short or gs.mp.remote_lobby_id or "?"
-        title = gs.fonts.big.render(f"LOBBY  [{short}]", True, TEXT_ACCENT)
-        screen.blit(title, (40, 20))
+        if self._title_short != short or self._title_surf is None:
+            self._title_short = short
+            self._title_surf = gs.fonts.big.render(f"LOBBY  [{short}]", True, TEXT_ACCENT)
+        screen.blit(self._title_surf, (40, 20))
 
         role = "HOST" if gs.mp.lobby_host else "CLIENT"
         role_t = gs.fonts.tiny.render(role, True, ACCENT_GREEN if gs.mp.lobby_host else TEXT_SECONDARY)
@@ -369,20 +441,35 @@ class MpLobbyScene:
         mode_t = gs.fonts.tiny.render(f"Mode: {mode}", True, TEXT_PRIMARY)
         screen.blit(mode_t, (140, 52))
 
-        # Player list
-        players_label = gs.fonts.main.render("PLAYERS", True, TEXT_ACCENT)
-        screen.blit(players_label, (40, 80))
-        y = 108
+        # Player list (rebuild cached column when roster / ready / fleets change)
+        if self._cache_players_label is None:
+            self._cache_players_label = gs.fonts.main.render("PLAYERS", True, TEXT_ACCENT)
+        screen.blit(self._cache_players_label, (40, 80))
         all_players = gs.mp.remote_relay_players or [gs.mp.player_name]
-        for pname in all_players:
-            is_self = pname == gs.mp.player_name
-            is_ready = gs.mp.remote_ready.get(pname, False) or (is_self and gs.mp.ready)
-            has_fleet = pname in gs.mp.player_fleet_designs
-            ready_col = ACCENT_GREEN if is_ready else TEXT_DIM
-            ready_lbl = "READY" if is_ready else "..."
-            fleet_lbl = " [fleet]" if has_fleet else ""
-            pt = gs.fonts.main.render(f"  {pname}{fleet_lbl}", True, TEXT_PRIMARY)
-            rt = gs.fonts.tiny.render(ready_lbl, True, ready_col)
+        pl_key = (
+            tuple(all_players),
+            gs.mp.player_name,
+            gs.mp.ready,
+            tuple((p, gs.mp.remote_ready.get(p, False)) for p in all_players),
+            tuple((p, p in gs.mp.player_fleet_designs) for p in all_players),
+        )
+        if pl_key != self._pl_snapshot:
+            self._pl_snapshot = pl_key
+            self._pl_rows_main = []
+            self._pl_rows_ready = []
+            for pname in all_players:
+                is_self = pname == gs.mp.player_name
+                is_ready = gs.mp.remote_ready.get(pname, False) or (is_self and gs.mp.ready)
+                has_fleet = pname in gs.mp.player_fleet_designs
+                ready_col = ACCENT_GREEN if is_ready else TEXT_DIM
+                ready_lbl = "READY" if is_ready else "..."
+                fleet_lbl = " [fleet]" if has_fleet else ""
+                self._pl_rows_main.append(
+                    gs.fonts.main.render(f"  {pname}{fleet_lbl}", True, TEXT_PRIMARY))
+                self._pl_rows_ready.append(
+                    gs.fonts.tiny.render(ready_lbl, True, ready_col))
+        y = 108
+        for pt, rt in zip(self._pl_rows_main, self._pl_rows_ready):
             screen.blit(pt, (50, y))
             screen.blit(rt, (340, y + 2))
             y += 26
@@ -391,8 +478,9 @@ class MpLobbyScene:
         if gs.mp.lobby_host:
             sp = pygame.Rect(WIDTH - 340, 80, 300, 180)
             draw_panel(screen, sp)
-            sh = gs.fonts.main.render("SETTINGS", True, TEXT_ACCENT)
-            screen.blit(sh, (sp.x + 12, sp.y + 8))
+            if self._cache_settings_hdr is None:
+                self._cache_settings_hdr = gs.fonts.main.render("SETTINGS", True, TEXT_ACCENT)
+            screen.blit(self._cache_settings_hdr, (sp.x + 12, sp.y + 8))
             mt = gs.fonts.tiny.render(f"Mode: {mode}", True, TEXT_PRIMARY)
             screen.blit(mt, (sp.x + 12, sp.y + 40))
             at = gs.fonts.tiny.render(
@@ -402,12 +490,18 @@ class MpLobbyScene:
         # Chat panel
         chat_panel = pygame.Rect(CHAT_X - 4, CHAT_Y - 4, CHAT_W + 8, CHAT_H + CHAT_INPUT_H + 18)
         draw_panel(screen, chat_panel)
-        ch = gs.fonts.tiny.render("CHAT", True, TEXT_ACCENT)
-        screen.blit(ch, (CHAT_X, CHAT_Y - 2))
+        if self._cache_chat_hdr is None:
+            self._cache_chat_hdr = gs.fonts.tiny.render("CHAT", True, TEXT_ACCENT)
+        screen.blit(self._cache_chat_hdr, (CHAT_X, CHAT_Y - 2))
         visible = gs.mp.chat_log[-MAX_CHAT_LINES:]
+        chat_key = tuple(visible)
+        if chat_key != self._chat_key:
+            self._chat_key = chat_key
+            self._chat_surfs = [
+                gs.fonts.micro.render(line[:100], True, TEXT_PRIMARY) for line in visible
+            ]
         cy = CHAT_Y + 16
-        for line in visible:
-            ct = gs.fonts.micro.render(line[:100], True, TEXT_PRIMARY)
+        for ct in self._chat_surfs:
             screen.blit(ct, (CHAT_X + 4, cy))
             cy += 16
         draw_text_field(screen, self._chat_input_rect(), gs.mp.chat_input,
@@ -435,6 +529,7 @@ class MpLobbyScene:
         draw_button(screen, self._fleet_rect(), "FLEET", gs.fonts.main,
                     hot=self._hover == "fleet")
 
-        hint = gs.fonts.micro.render(
-            "ESC -- leave  |  ENTER to chat  |  FLEET to design ships", True, TEXT_DIM)
-        screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, HEIGHT - 20))
+        if self._cache_hint is None:
+            self._cache_hint = gs.fonts.micro.render(
+                "ESC -- leave  |  ENTER to chat  |  FLEET to design ships", True, TEXT_DIM)
+        screen.blit(self._cache_hint, (WIDTH // 2 - self._cache_hint.get_width() // 2, HEIGHT - 20))

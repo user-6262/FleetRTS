@@ -18,7 +18,8 @@ Client -> server (after join):
   {"t":"client_msg","body":{...}}
 
 Server -> client:
-  {"t":"joined","lobby_id":"...","players":["a","b"]}
+  {"t":"joined","lobby_id":"...","players":["a","b"],"you":"<assigned_name>"}  (first line to joiner only)
+  {"t":"joined","lobby_id":"...","players":["a","b"]}  (broadcast to room when someone joins)
   {"t":"relay","from":"alice","body":{...}}
   {"t":"peer_left","player":"bob","players":[...]}
   {"t":"error","code":"...","message":"..."}
@@ -160,8 +161,9 @@ class ClientHandler(threading.Thread):
             self.player = _relay_unique_display_name(taken, player or "?")
             room.append(self)
             players = [h.player for h in room]
-        joined = {"t": "joined", "lobby_id": lid, "players": players}
-        self.broadcast(joined, skip_self=False)
+        joined_pub = {"t": "joined", "lobby_id": lid, "players": players}
+        self.send_obj({**joined_pub, "you": self.player})
+        self.broadcast(joined_pub, skip_self=True)
 
     def _handle_client_msg(self, msg: Dict[str, Any]) -> None:
         if msg.get("t") != "client_msg":

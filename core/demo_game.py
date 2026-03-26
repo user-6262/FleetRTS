@@ -4173,6 +4173,7 @@ def run() -> None:
     mp_hub_last_ok_ms: int = 0
     remote_lobby_id: Optional[str] = None
     remote_lobby_short: Optional[str] = None
+    mp_http_leave_name: Optional[str] = None
     remote_lobby_http_players: List[str] = []
     remote_relay_players: List[str] = []
     mp_relay: Optional[Any] = None
@@ -4224,10 +4225,10 @@ def run() -> None:
     mp_host_snap_tick = -1
 
     def disconnect_mp_session() -> None:
-        nonlocal mp_relay, remote_lobby_id, remote_lobby_short, mp_chat_input, mp_chat_focus
+        nonlocal mp_relay, remote_lobby_id, remote_lobby_short, mp_http_leave_name, mp_chat_input, mp_chat_focus
         nonlocal mp_match_generation, mp_applied_remote_start_gen, mp_lobby_authoritative
         _leave_lid = remote_lobby_id
-        _leave_name = mp_player_name
+        _leave_name = (mp_http_leave_name or mp_player_name or "").strip()
         _leave_base = fleet_http_base
         if NET_MP and leave_lobby is not None and _leave_base and _leave_lid and (_leave_name or "").strip():
             try:
@@ -4239,6 +4240,7 @@ def run() -> None:
             mp_relay = None
         remote_lobby_id = None
         remote_lobby_short = None
+        mp_http_leave_name = None
         remote_lobby_http_players.clear()
         remote_relay_players.clear()
         mp_chat_log.clear()
@@ -4518,23 +4520,39 @@ def run() -> None:
         nonlocal mp_net_err, remote_relay_players, mp_chat_log, remote_ready, remote_loadouts
         nonlocal mp_mode_coop, mp_use_asteroids, mp_enemy_pressure, mp_applied_remote_start_gen
         nonlocal mp_round_idx, mp_ready, mp_toast_text, mp_toast_until_ms
-        nonlocal mp_host_cmd_queue, mp_pending_snap
+        nonlocal mp_host_cmd_queue, mp_pending_snap, mp_player_name, mp_name_buffer
+        nonlocal mp_player_fleet_designs, remote_player_colors
         if mp_relay is None:
             return
         if mp_relay.error:
             mp_net_err = mp_relay.error
         for _m in mp_relay.poll():
             if _m.get("t") == "joined":
+                you = _m.get("you")
+                prev_n = len(remote_relay_players)
+                if isinstance(you, str) and you.strip():
+                    yn = you.strip()[:64]
+                    old = mp_player_name
+                    if yn != old:
+                        if old in mp_player_fleet_designs:
+                            mp_player_fleet_designs[yn] = mp_player_fleet_designs.pop(old)
+                        if old in remote_player_colors:
+                            remote_player_colors[yn] = remote_player_colors.pop(old)
+                    mp_player_name = yn
+                    mp_name_buffer = yn
                 remote_relay_players = list(_m.get("players") or [])
-                mp_relay.send_payload(lobby_ready(mp_ready))
-                if mp_lobby_host:
-                    send_host_config_if_online()
-                in_fd = phase == "ship_loadouts" and mp_loadouts_active
-                mp_relay.send_payload(lobby_presence(in_fleet_design=in_fd, color_id=mp_player_color_id))
-                if lobby_loadout is not None:
+                announce = (isinstance(you, str) and bool(you.strip())) or len(remote_relay_players) > prev_n
+                if announce:
+                    mp_relay.send_payload(lobby_ready(mp_ready))
+                    if mp_lobby_host:
+                        send_host_config_if_online()
+                    in_fd = phase == "ship_loadouts" and mp_loadouts_active
                     mp_relay.send_payload(
-                        lobby_loadout(payload={"fleet": export_player_fleet_design(mp_fleet_groups)})
-                    )
+                        lobby_presence(in_fleet_design=in_fd, color_id=mp_player_color_id))
+                    if lobby_loadout is not None:
+                        mp_relay.send_payload(
+                            lobby_loadout(payload={"fleet": export_player_fleet_design(mp_fleet_groups)})
+                        )
             elif _m.get("t") == "peer_left":
                 remote_relay_players = list(_m.get("players") or [])
                 left_p = str(_m.get("player") or "")
@@ -5233,6 +5251,7 @@ def run() -> None:
                         lob, joined_as, _qj = quick_join(fleet_http_base, mp_player_name)
                         mp_player_name = joined_as[:48]
                         mp_name_buffer = joined_as[:48]
+                        mp_http_leave_name = joined_as[:64]
                         remote_lobby_id = str(lob.get("id") or "")
                         remote_lobby_short = str(lob.get("short_id") or "")
                         remote_lobby_http_players = list(lob.get("players") or [])
@@ -5275,6 +5294,7 @@ def run() -> None:
                                     )
                                     mp_player_name = joined_as[:48]
                                     mp_name_buffer = joined_as[:48]
+                                    mp_http_leave_name = joined_as[:64]
                                     remote_lobby_id = str(lob.get("id") or "")
                                     remote_lobby_short = str(lob.get("short_id") or "")
                                     remote_lobby_http_players = list(lob.get("players") or [])
@@ -5302,6 +5322,8 @@ def run() -> None:
                         remote_lobby_id = str(lob.get("id") or "")
                         remote_lobby_short = str(lob.get("short_id") or "")
                         remote_lobby_http_players = list(lob.get("players") or [])
+                        plh = list(lob.get("players") or [])
+                        mp_http_leave_name = str(plh[0])[:64] if plh else mp_player_name[:64]
                         connect_relay(lob)
                         mp_lobby_host = True
                         mp_ready = False
@@ -5331,6 +5353,7 @@ def run() -> None:
                             )
                             mp_player_name = joined_as[:48]
                             mp_name_buffer = joined_as[:48]
+                            mp_http_leave_name = joined_as[:64]
                             remote_lobby_id = str(lob.get("id") or "")
                             remote_lobby_short = str(lob.get("short_id") or "")
                             remote_lobby_http_players = list(lob.get("players") or [])

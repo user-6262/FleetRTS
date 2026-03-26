@@ -182,7 +182,14 @@ When something breaks, check in order
 
 Build Commands (Windows, from repo root c:\projects\python\FleetRTS)
 --------------------------------------------------------------------
-  Close FleetRTS.exe if open (or builds may fail deleting dist\FleetRTS).
-  pyinstaller -y FleetRTS.spec
-  Output: dist\FleetRTS\FleetRTS.exe (folder is the whole app; zip it for friends).
-  If dist is locked, use: pyinstaller -y --distpath dist_build FleetRTS.spec
+  Close FleetRTS.exe if open (or PyInstaller may fail removing dist\FleetRTS).
+
+  pyinstaller FleetRTS.spec --noconfirm
+
+  Output folder (default --distpath dist):  dist\FleetRTS\
+  Run:  dist\FleetRTS\FleetRTS.exe   (zip the whole FleetRTS folder for friends).
+
+  If dist\FleetRTS is locked by Windows, close the game/explorer windows using it,
+  or build to a temp folder then replace dist when free:
+    pyinstaller FleetRTS.spec --noconfirm --distpath dist_tmp
+    (then rename/remove dist and move dist_tmp\FleetRTS into place as needed)

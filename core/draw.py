@@ -148,6 +148,31 @@ def draw_starfield(surf: pygame.Surface,
         if 0 <= sx < vis_w and 0 <= sy < vis_h:
             surf.set_at((sx, sy), (br, br, min(255, br + 40)))
 
+
+# Cached full-screen menu backdrop (avoids hundreds of set_at calls per frame on MP hub/lobby).
+_MENU_BG_CACHE: Dict[Tuple[int, int], pygame.Surface] = {}
+
+
+def blit_menu_background(surf: pygame.Surface, vis_w: int, vis_h: int) -> None:
+    """Fill surf with deep space + sparse stars in one blit (built once per size)."""
+    key = (vis_w, vis_h)
+    bg = _MENU_BG_CACHE.get(key)
+    if bg is None:
+        raw = pygame.Surface((vis_w, vis_h))
+        raw.fill(BG_DEEP)
+        rng = random.Random(42)
+        for _ in range(320):
+            x = rng.randrange(vis_w)
+            y = rng.randrange(vis_h)
+            br = rng.randint(40, 120)
+            raw.set_at((x, y), (br, br, min(255, br + 40)))
+        try:
+            bg = raw.convert()
+        except pygame.error:
+            bg = raw
+        _MENU_BG_CACHE[key] = bg
+    surf.blit(bg, (0, 0))
+
 # ---------------------------------------------------------------------------
 # World edge
 # ---------------------------------------------------------------------------
